@@ -1,6 +1,5 @@
 <img width="1578" height="1908" alt="Screenshot 2026-09-05 at 10 24 19 PM" src="https://github.com/user-attachments/assets/5e80682b-140a-457d-9ddd-a89411d8dfa8" />
 
-
 # MediaEngine
 
 A dedicated, high-performance batch video encoder and deep media inspector engineered from the ground up for macOS and Apple Silicon. MediaEngine leverages native Apple VideoToolbox hardware encoding blocks, intelligent dynamic thread/resolution scheduling, and perceptual temporal noise reduction to produce ultra-compact, visually lossless masters and edit-ready files.
