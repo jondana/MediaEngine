@@ -1,234 +1,198 @@
 # MediaEngine
 
-MediaEngine is a high-performance, standalone batch video encoder and media analysis suite engineered specifically for macOS and Apple Silicon architecture. Built around static FFmpeg binaries and Apple's native **VideoToolbox** framework, MediaEngine delivers hardware-accelerated HEVC and H.264 transcoding, intelligent hardware-tier workload scheduling, perceptual temporal denoising, and precision color metadata preservation.
+A dedicated, high-performance batch video encoder and deep media inspector engineered from the ground up for macOS and Apple Silicon. MediaEngine leverages native Apple VideoToolbox hardware encoding blocks, intelligent dynamic thread/resolution scheduling, and perceptual temporal noise reduction to produce ultra-compact, visually lossless masters and edit-ready files.
+
+[![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2011.0%2B-000000.svg?style=flat-square&logo=apple)](https://www.apple.com/macos/)
+[![Architecture: Apple Silicon](https://img.shields.io/badge/Architecture-Apple%20Silicon%20(Universal)-46748A.svg?style=flat-square)](https://support.apple.com/en-us/HT211814)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg?style=flat-square)](https://www.gnu.org/licenses/gpl-3.0.en.html)
+[![Support on Ko-fi](https://img.shields.io/badge/Support-Ko--fi-FF5E5B.svg?style=flat-square&logo=kofi)](https://ko-fi.com/jondana)
 
 ---
 
-## Download
+## The Origin of MediaEngine
 
-The latest pre-built distribution DMG can be downloaded directly from GitHub Releases:
+MediaEngine was born out of frustration with existing macOS encoding utilities when handling high-resolution cinema footage in mobile post-production workflows.
 
-**[Download MediaEngine.dmg](https://github.com/jondana/MediaEngine/releases/latest/download/MediaEngine.dmg)**
+When shooting 8K Canon Cinema RAW Light or C-Log3 on a Canon EOS R5, storage requirements and compute overhead quickly become prohibitive. Editing natively on location requires either massive external RAID arrays or lengthy offline proxy generation workflows. Transcoding batches of hundreds of raw takes through standard tools presented continuous roadblocks:
+
+* **HandBrake** offers hardware acceleration, but enforces an unskippable preliminary clip scan and preview generation phase for every single queued file. When importing hundreds of clips from multiple cards, this pre-scan can lock up the system for tens of minutes before a single frame is encoded.
+* **General-purpose encoders** frequently omit native Apple VideoToolbox 10-bit 4:2:2 hardware pipelines, lack accurate color container tagging (`colr` and `nclx` atom synthesis), or drop crucial HDR10 / mastering display metadata entirely.
+* **Interface overload** in existing tools buries critical parameters under dozens of nested tabs and technical checkboxes that have little to no positive impact on final image quality or compression ratio.
+
+MediaEngine was designed as the antidote: a clean, robust, and zero-latency batch processing tool with no preview stalls and no bloated menus. It exposes only the parameters that genuinely impact image fidelity, utilizing Apple's hardware encoding engines alongside Constant Quality targets. 
+
+This pipeline compresses high-bitrate 8K C-Log3 footage down to roughly 30–40 Mbps while retaining 10-bit color accuracy, smooth grading headroom, and instant native hardware playback in Final Cut Pro on an Apple Silicon MacBook Pro. An entire shoot's library can remain on internal storage, making a fully mobile, high-resolution editing workflow practical without dedicated proxy files.
 
 ---
 
-## Architectural Overview
+## Architectural Overview & Under the Hood
 
-MediaEngine is designed from the ground up to eliminate the performance bottlenecks, interface latency, and heavy dependency footprints common to generic GUI wrappers. It runs self-contained static binaries and directly leverages macOS system calls to coordinate encoding jobs across hardware execution units.
+### 1. Hardware Silicon Profiling & Dynamic Concurrency Scheduling
+
+Apple Silicon processors contain dedicated hardware media engines separate from CPU and GPU cores. The number of active hardware video encoders scales across chip tiers:
+* **Base (M1/M2/M3/M4):** 1 Encode Engine
+* **Pro:** 1 Encode Engine
+* **Max:** 2 Encode Engines
+* **Ultra:** 4 Encode Engines
+
+Running too few concurrent encodes underutilizes the silicon, while running too many jobs causes VideoToolbox context thrashing, frame dropouts, out-of-memory crashes, or hardware lockouts (such as errors `-12905`, `-12915`, and `-17691`).
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                              MediaEngine                               │
-│  (CustomTkinter 120 FPS Sub-Pixel Quartz Kinetic Scrolling Interface)  │
-└──────────────────────────────────┬─────────────────────────────────────┘
-                                   │
-      ┌────────────────────────────┼────────────────────────────┐
-      ▼                            ▼                            ▼
-┌──────────────┐         ┌───────────────────┐         ┌─────────────────┐
-│ Media        │         │ Hardware Topology │         │ Audio & Subtitle│
-│ Inspector    │         │ & Concurrency     │         │ Stream Mapping  │
-│ (ffprobe JSON│         │ Scheduler         │         │ (Passthrough &  │
-│ Stream Parse)│         │ (sysctl Profiling)│         │ Conforming)     │
-└──────────────┘         └─────────┬─────────┘         └─────────────────┘
-                                   │
-                                   ▼
-      ┌─────────────────────────────────────────────────────────┐
-      │               Perceptual Processing Pipeline             │
-      │  • Asymmetric Luma/Chroma Temporal Filter (atadenoise)   │
-      │  • Alpha Channel Detection & Premultiplication Pipeline │
-      │  • HDR10 / HLG Color Science & QuickTime 'colr' Atom     │
-      └────────────────────────────┬────────────────────────────┘
-                                   │
-                                   ▼
-      ┌─────────────────────────────────────────────────────────┐
-      │               Apple VideoToolbox / CPU Core             │
-      │  • M-Series Media Engine Concurrency Dispatcher         │
-      │  • Staggered Launch & Hardware Recovery Watchdogs       │
-      │  • 10-Bit 4:2:2 (p210le) / 10-Bit 4:2:0 (p010le)        │
-      └─────────────────────────────────────────────────────────┘
+[ Ingest Queue ]
+       │
+       ▼
+[ Probe & Categorize ]
+  ├── 8K Footage  ───────►  Weight: 6 Units (Cap: 1 per Engine)
+  ├── 4K Footage  ───────►  Weight: 2 Units
+  └── HD / 1440p  ───────►  Weight: 1 Unit
+       │
+       ▼
+[ Dynamic Budgeting Engine ] ◄── Evaluates Chip Tier & Active Load
+       │
+       ├─► Sequential Mode: 1 Job Strict
+       ├─► Balanced Mode:   Optimal Silicon Saturation (2 × Multiplier)
+       └─► Turbo Mode:      Maximum Throughput with RAM Guardrails
+       │
+       ▼
+[ Staggered Hardware Dispatch ] (Avoids simultaneous VT initialization)
 ```
 
----
+MediaEngine automates load balancing through an internal resource scheduler:
 
-## Key Systems & Under-the-Hood Mechanics
-
-### 1. Hardware Topology & Dynamic Concurrency Allocation
-
-Unlike conventional encoding tools that assign a fixed number of simultaneous jobs, MediaEngine queries the macOS kernel via `sysctl` to detect the exact Apple Silicon generation and chip tier:
-
-* **Apple M-Series Base / Pro**: Identified as having 1 dedicated VideoToolbox encode engine.
-* **Apple M-Series Max**: Identified as having 2 parallel hardware encode engines.
-* **Apple M-Series Ultra**: Identified as having 4 parallel hardware encode engines.
-
-MediaEngine couples this hardware profile with physical memory interrogation (`hw.memsize` / `SC_PHYS_PAGES`) and resolution-based resource weighting to prevent memory exhaustion, bus contention, and hardware encoder timeouts (`-12903`, `-12912`, `-17691`).
-
-#### Resolution Weighting Matrix
-
-Before jobs are queued for execution, the stream geometry is probed:
-
-| Resolution Category | Definition | Resource Weight | Concurrency Impact |
-| :--- | :--- | :--- | :--- |
-| **8K UHD / DCI** | $\ge 7000 \times 4000$ or $\ge 25\text{ MP}$ | **6 Units** | Restricts concurrent execution; throttled by strict chip-tier quotas |
-| **4K UHD / DCI** | $\ge 3500 \times 2000$ or $\ge 7\text{ MP}$ | **2 Units** | Balanced distribution across media engines |
-| **1440p / 1080p / SD** | $< 3500 \times 2000$ | **1 Unit** | Maximizes throughput across available cores |
-
-#### Concurrency Modes
-
-* **Sequential**: Runs 1 active job at a time, allocating maximum system bandwidth to single-file completion.
-* **Balanced**: Matches hardware engine capabilities ($2\times \text{media engines}$, capping total weight relative to chip tier).
-* **Turbo**: Exploits unified memory bandwidth on high-memory systems (up to $3\times \text{media engines}$ on Max/Ultra configurations, scaled automatically on machines with $\le 8\text{ GB}$ RAM).
-
-To prevent bus locking during initialization, MediaEngine employs an **asynchronous launch stagger** (800ms delay between 8K instances; 200ms between standard instances) coupled with an automatic fallback mechanism that traps stalled sessions and automatically re-routes them through software decoding or extended exponential backoff.
+* **System Interrogation:** On launch, the engine probes system architecture via `machdep.cpu.brand_string` and registers available memory using `hw.memsize`.
+* **Capability Validation:** The application dynamically runs isolated micro-tests against `hevc_videotoolbox` to confirm hardware-level 10-bit 4:2:2 (`p210le` / `main42210`) support and `spatial_aq` availability. If a given Mac tier lacks 4:2:2 hardware write support, MediaEngine safely falls back to high-profile 10-bit 4:2:0 without crashing or dropping bit depth.
+* **Weighted Resolution Budgeting:** Not all streams exert equal pressure on the media blocks. MediaEngine assigns resource units dynamically:
+  * **8K Streams:** 6 Resource Units (strictly capped to 1 per engine to preserve cache locality).
+  * **4K Streams:** 2 Resource Units.
+  * **1080p / 1440p Streams:** 1 Resource Unit.
+* **Staggered Dispatch:** Concurrent hardware jobs are staggered by up to 800 ms to eliminate initial driver lock contention during pipeline allocation.
+* **Process Throttling & Live Rebalancing:** When system resource thresholds shift or a user adjusts concurrency between *Sequential*, *Balanced*, and *Turbo*, background jobs are paused or resumed cleanly using low-level POSIX signals (`SIGSTOP` / `SIGCONT`), preventing memory pressure spikes.
 
 ---
 
-### 2. Perceptual Temporal Denoising & Bitrate Optimization
+### 2. Perceptual Noise Reduction & Bitrate Conservation
 
-Digital camera sensors introduce high-frequency, non-correlated noise—most noticeably in shadows and flat color fields. Modern block-based video encoders (HEVC and AVC) treat random sensor noise as genuine motion detail. Consequently, a massive percentage of the encoder's bitrate budget is spent encoding temporal artifacts rather than structural image data.
+Raw camera sensors and high-ISO log profiles exhibit microscopic temporal grain and high-frequency chrominance variance. 
 
-MediaEngine implements a custom-tuned `atadenoise` (Adaptive Temporal Averaging Denoiser) stage that operates across multi-frame temporal windows:
+Modern block-based video codecs (HEVC / AVC) allocate immense amounts of data attempting to mathematically reconstruct random, fluctuating noise across frames. Macroblocks struggle to find coherent motion vectors between frames, forcing the encoder to fall back on expensive intra-coded blocks and bloating bitrates with visual entropy that conveys no real image information.
 
 ```
-Raw Frame Sequence (N-2, N-1, N, N+1, N+2)
-                   │
-                   ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              Planar Pixel Representation Conversion             │
-│                (yuv422p10le / yuv420p10le)                      │
-└──────────────────┬─────────────────────────────┬────────────────┘
-                   │                             │
-                   ▼                             ▼
-       Luminance Plane (Y)             Chrominance Planes (U/V)
-    ┌────────────────────────┐      ┌────────────────────────┐
-    │ Conservative Filtering │      │  Aggressive Smoothing  │
-    │   Threshold A: 1.2x    │      │   Threshold A: 2.0x    │
-    │   Threshold B: 3.5x    │      │   Threshold B: 5.5x    │
-    └──────────────┬─────────┘      └────────────┬───────────┘
-                   │                             │
-                   └──────────────┬──────────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────────┐
-│     Preserved Edges & Textures + Cleared Color Noise Floor      │
-│      Result: Drastically lower encoder entropy = smaller files   │
-└─────────────────────────────────────────────────────────────────┘
+Raw Camera Input ──► [ Split Frequency Analysis ]
+                           │
+                           ├── Luma Channel (Y')   ──► Conservative Thresholds (Sharp Detail)
+                           └── Chroma Channels (UV) ──► Aggressive Temporal Averaging (Grain Removal)
+                                                            │
+                                                            ▼
+                                               Cleaned Inter-Frame Prediction
+                                                            │
+                                                            ▼
+                                            Drastically Lower Bitrate / Smaller File
 ```
 
-#### Asymmetric Luma vs. Chroma Tuning
+MediaEngine incorporates an adaptive temporal averaging pipeline (`atadenoise`) operating in a high-depth planar color space (`yuv422p10le` / `yuv420p10le`), parameterized by split luma/chroma thresholds:
 
-Human visual perception is substantially more sensitive to high-frequency spatial variation in luminance than in chrominance. MediaEngine deliberately targets sensor noise by decoupling luma and chroma thresholds:
+$$\text{Threshold}_{\text{Luma}} = k \cdot [1.2, 3.5]$$
 
-* **Luma Thresholds (`0a`, `0b`)**: Kept conservative ($1.2\times$ and $3.5\times$ scaling) to protect edge sharpness, fine hair, fabric weave, and micro-contrast.
-* **Chroma Thresholds (`1a`, `1b`, `2a`, `2b`)**: Filtered aggressively ($2.0\times$ and $5.5\times$ scaling) to eliminate low-light color speckling, magenta/green blotchiness, and temporal chroma crawling.
+$$\text{Threshold}_{\text{Chroma}} = k \cdot [2.0, 5.5]$$
 
-By eliminating random chroma variation between successive frames, inter-frame motion vectors achieve significantly higher predictive accuracy. This yields **file size reductions between 25% and 60%** without noticeable softening of fine image details.
-
-#### Automatic HDR Transfer Bypass
-
-Temporal averaging algorithms designed for gamma curves will compress dynamic range and clip highlights when applied to non-linear High Dynamic Range transfer functions. MediaEngine automatically inspects the input stream's color transfer characteristics: if **SMPTE 2084 (PQ)** or **ARIB STD-B67 (HLG)** is detected, temporal denoising is bypassed, safeguarding pristine highlight roll-off and shadow delineation.
+* **Chroma-Biased Attenuation:** Human vision is substantially more sensitive to edge sharpness (luma) than high-frequency chromatic variations (chroma). MediaEngine weights chrominance filtering significantly higher than luminance filtering. This strips digital color blotches and sensor noise from shadows while keeping fine physical textures and skin tones intact.
+* **Motion-Adaptive Temporal Window:** The temporal sample window scales dynamically from 5 to 9 successive frames depending on the selected intensity. Moving subjects remain free of ghosting artifacts, while static backgrounds settle into clean, easily compressible fields.
+* **HDR Safety Bypass:** Applying temporal averaging filters to non-linear High Dynamic Range transfer functions (SMPTE ST 2084 / PQ or ARIB STD-B67 / HLG) can cause highlight stepping and shadow clipping. MediaEngine inspects incoming color metadata and automatically suspends spatial-temporal filtering on HDR inputs to maintain photometric accuracy.
 
 ---
 
-### 3. Apple VideoToolbox Hardware Pipeline
+### 3. Native Final Cut Pro Compatibility & Constant Quality Encoding
 
-MediaEngine includes deep runtime integration with Apple's VideoToolbox framework:
+Rather than using bitrate caps that under-allocate complex scenes and waste bandwidth on simple ones, MediaEngine drives VideoToolbox via Constant Quality mode (`-q:v`).
 
-* **Dynamic 10-Bit 4:2:2 Pro Capability Detection**: Probes the hardware at startup (`nullsrc` pipeline test with `-profile:v main42210 -pix_fmt p210le`). If supported by the silicon, 10-Bit 4:2:2 encoding is available; otherwise, the interface cleanly constrains presets to 10-Bit 4:2:0 (`p010le`) or 8-Bit 4:2:0 (`nv12`).
-* **Spatial Adaptive Quantization (`spatial_aq`)**: When supported by the underlying FFmpeg build and hardware, Spatial AQ is engaged to dynamically distribute bit allocation across high-complexity spatial regions, preventing macroblocking in complex textures.
-* **Hardware Recovery Watchdog**: If a VideoToolbox session hangs or becomes unresponsive during high-throughput batches, a background thread intervenes, issues a clean `SIGKILL` to the isolated process group, cleans temporary lock references, and re-dispatches the file with software fallbacks.
-
----
-
-### 4. Alpha Channel & Transparency Handling
-
-Standard hardware and CPU encoding pipelines strip or mishandle alpha transparency. When MediaEngine detects an alpha channel in the input stream (`yuva`, `rgba`, `bgra`, `ya8`, etc.):
-
-1. CPU and H.264 options are overridden to route the file through `hevc_videotoolbox`.
-2. Output containers are conformed to `.mov` (Apple QuickTime).
-3. The stream is evaluated for premultiplication metadata (`alpha_mode`). If non-premultiplied, an in-place premultiplication filter (`premultiply=inplace=1`) is inserted to prevent dark fringing along anti-aliased boundaries.
-4. Frames are encoded with `-pix_fmt bgra -tag:v hvc1 -vtag hvc1 -alpha_quality 0.75`, ensuring full transparency preservation inside macOS, Final Cut Pro, DaVinci Resolve, and Adobe Premiere Pro.
+* **Predictable Visual Fidelity:** Complex high-frequency scenes (water, foliage, fine textiles) automatically receive higher bit allocation, while simple gradients and static interviews drop to lower bitrates without macroblocking.
+* **Hardware Decoding in Final Cut Pro:** Apple's VideoToolbox encoder produces standards-compliant bitstreams tagged with proper four-character codes (`hvc1` / `avc1`). Files imported into Final Cut Pro or DaVinci Resolve bypass software translation layers and play directly through Apple Silicon's hardware decoding hardware.
+* **Preserving Alpha Channels:** When transparent assets (ProRes 4444, QuickTime Animation) are processed, MediaEngine identifies embedded alpha channels, premultiplies transparency, and routes the stream to 32-bit `bgra` VideoToolbox containers, generating compact HEVC files with fully intact transparency.
 
 ---
 
-### 5. Professional Color Science & Metadata Passthrough
+### 4. Color Science and Metadata Fidelity
 
-To ensure accurate playback between QuickTime Player, web browsers, and non-linear editors, MediaEngine enforces strict NCLX color tagging:
+Maintaining broadcast and archival standards requires strict color container preservation. MediaEngine reads, maps, and writes explicit NCLX and mastering display atoms:
 
-* **Color Space Parameters**: Automatically parses and conforms `color_primaries`, `color_trc`, and `colorspace` (e.g., BT.709, BT.2020, SMPTE 240M, DCI-P3).
-* **Mastering Display & Light Level Metadata**: Preserves SMPTE 2086 mastering display coordinates (display primaries, white point, min/max luminance) and Content Light Level metrics (MaxCLL / MaxFALL).
-* **QuickTime Atom Injection**: Writes the NCLX color record directly into the container header (`-movflags +write_colr`), eliminating the common gamma shift bug in macOS QuickTime playback.
+| Parameter | Standard Input Values | FFmpeg & VideoToolbox Parameter Mapping |
+| :--- | :--- | :--- |
+| **Color Primaries** | BT.709, BT.2020, DCI-P3 (Display P3) | `color_primaries` / ISO/IEC 23001-4 NCLX code points |
+| **Transfer Function** | BT.709, sRGB, PQ (ST 2084), HLG (BT.2100) | `color_trc` / Exact EOTF curve declaration |
+| **Matrix Coefficients** | BT.709, BT.2020 non-constant, SMPTE 170M | `colorspace` / Chrominance matrix conversion tags |
+| **HDR Static Metadata** | SMPTE ST 2086 (Mastering Display) | Parsed chromaticity coordinates $(x,y)$ and min/max luminance |
+| **Light Levels** | CTA-861.3 Content Light Level | Parsed MaxCLL / MaxFALL injection |
+| **Timecode** | Drop-Frame / Non-Drop Frame SMPTE TC | Explicit `-timecode` synthesis and passthrough |
 
 ---
 
-### 6. Built-in Media Inspector
+## Features
 
-MediaEngine features an integrated, non-blocking media inspector that extracts deep stream metadata using static `ffprobe` JSON parsing:
-
-* **Container Analysis**: Format identification, global bitrate, container creation timestamps, encoder/writing application signatures.
-* **Video Streams**: Profile, level, pixel format, calculated bits-per-pixel (BPP), display aspect ratio, frame rate mode (CFR vs. VFR), and full color parameter matrices.
-* **Audio & Auxiliary Streams**: Channel configurations (down to individual surround layouts), audio sample rates, stream bitrates, embedded subtitle formats, and cover artwork attachments.
-* **Raw JSON View**: Provides raw programmatic output for quality control verification and debugging.
+* **Hardware-Accelerated Encoding:** Full support for Apple VideoToolbox HEVC (10-bit 4:2:2, 10-bit 4:2:0, 8-bit) and H.264.
+* **Software Fallback (CPU):** Integrated `libx265` and `libx264` support with deep tuning parameters (AQ modes, psycho-visual rate-distortion, SAO disabling) for systems requiring software-level control.
+* **Deep Media Inspector:** Detailed inspection tab detailing container profiles, bit depths, chroma sub-sampling formats, track indices, audio channel layouts, HDR side data, and raw JSON streams.
+* **Zero Host Dependencies:** Ships with true static builds of FFmpeg and FFprobe compiled with VideoToolbox bindings; no Homebrew, Python, or command-line tools required for the end user.
+* **Intelligent Subtitle & Audio Handling:** Automatic multi-stream audio mapping (copying uncompressed/AAC streams when appropriate, transcoding complex multi-channel formats) and subtitle track normalization.
+* **Fluid 120 FPS UI:** Built using CustomTkinter with custom Quartz-based kinetic physics scrolling engines for responsiveness under heavy loads.
 
 ---
 
 ## Installation
 
-Because MediaEngine is independently built and distributed without an Apple Developer certificate, macOS Gatekeeper applies a quarantine attribute to the application bundle upon download.
+### Pre-Built Binaries (macOS 11.0+)
 
-### Standard Setup
+1. Download the latest `MediaEngine.dmg` from the [**Releases Page**](https://github.com/jondana/MediaEngine/releases/latest).
+2. Open the disk image and drag **MediaEngine.app** to your `/Applications` directory.
 
-1. Download **`MediaEngine.dmg`** from the [Releases](https://github.com/jondana/MediaEngine/releases/latest) section.
-2. Open the DMG and drag **MediaEngine.app** into your **Applications** folder.
-3. Open **Terminal** (`Cmd + Space`, type `Terminal`, hit `Enter`).
-4. Execute the following command to strip the quarantine flag:
+#### Gatekeeper Initialization (One-Time Setup)
+Because MediaEngine is independently built and ad-hoc signed, macOS Gatekeeper may flag it as unverified on first launch. To permit execution:
+
+1. Open **Terminal** (`Cmd + Space`, type `Terminal`, hit `Enter`).
+2. Run the following command:
    ```bash
    xattr -cr /Applications/MediaEngine.app
    ```
-5. Launch **MediaEngine** directly from Applications, Spotlight, or Launchpad.
+3. MediaEngine will now open immediately via standard double-click or Spotlight.
 
 ---
 
 ## Building from Source
 
-MediaEngine can be compiled directly into a self-contained `.app` and distributor `.dmg` using the provided build automation script.
+MediaEngine provides an automated build script that handles virtual environments, PyInstaller packaging, static FFmpeg binary acquisition, and `.dmg` staging.
 
 ### Prerequisites
+* macOS 11.0 Big Sur or later (Apple Silicon recommended).
+* Python 3.11, 3.12, or 3.13 with Tkinter support:
+  ```bash
+  brew install python-tk
+  ```
 
-* macOS 11.0 (Big Sur) or higher (Apple Silicon or Intel).
-* Python 3.11, 3.12, or 3.13 with Tkinter support (installable via Homebrew: `brew install python-tk`).
-* Xcode Command Line Tools (`xcode-select --install`).
+### Build Execution
 
-### Build Steps
-
-1. Clone this repository or download the source:
+1. Clone the repository:
    ```bash
    git clone https://github.com/jondana/MediaEngine.git
    cd MediaEngine
    ```
-
-2. Make the build script executable and run it:
+2. Make the build script executable and run:
    ```bash
    chmod +x build_encoder.sh
    ./build_encoder.sh
    ```
-
-The script will automatically:
-* Verify or download genuine static FFmpeg and FFprobe binaries compiled with VideoToolbox support.
-* Construct an isolated Python virtual environment and install PyInstaller, CustomTkinter, Pillow, and TkinterDnD2.
-* Package the application bundle with full Retina icons (`.icns`) and appropriate `Info.plist` entitlement descriptions.
-* Sign the resulting `.app` bundle ad-hoc.
-* Output a finished, ready-to-distribute **`MediaEngine.dmg`** onto your Desktop.
+3. Upon completion, the compiled, standalone `MediaEngine.dmg` and application bundle will be placed on your Desktop.
 
 ---
 
-## Supporting the Project
+## Support & Contributions
 
-If MediaEngine streamlines your video workflow or saves you rendering time, consider supporting ongoing development:
+MediaEngine is completely free and open-source software. If this tool saves you time, simplifies your editing setup, or helps your production pipeline, consider supporting ongoing development:
 
-[![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20the%20Project-orange?style=for-the-badge&logo=kofi)](https://ko-fi.com/jondana)
+[![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/jondana)
+
+Bug reports, feature requests, and pull requests are welcome on GitHub.
 
 ---
 
 ## License
 
-This project is licensed under the terms of the GPL License. Embedded static FFmpeg binaries are licensed under the LGPL/GPL depending on configuration flags.
+MediaEngine is licensed under the terms of the **GNU General Public License v3.0 (GPL-3.0)**. You are free to inspect, modify, and redistribute the source code under the provisions of the license. See the [LICENSE](LICENSE) file for complete details.
