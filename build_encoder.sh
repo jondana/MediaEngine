@@ -1062,6 +1062,23 @@ class SplitValueLabel(ctk.CTkFrame):
             return f"{self.lbl_num.cget('text')} {self.lbl_desc.cget('text')}".strip()
         return super().cget(key)
 
+def blend_hex(fg_hex, bg_hex, alpha):
+    try:
+        alpha = max(0.0, min(1.0, float(alpha)))
+        if alpha >= 0.999: return fg_hex
+        if alpha <= 0.001: return bg_hex
+        fg = str(fg_hex).lstrip("#")
+        bg = str(bg_hex).lstrip("#")
+        if len(fg) != 6 or len(bg) != 6: return fg_hex
+        r1, g1, b1 = int(fg[0:2], 16), int(fg[2:4], 16), int(fg[4:6], 16)
+        r2, g2, b2 = int(bg[0:2], 16), int(bg[2:4], 16), int(bg[4:6], 16)
+        r = int(r1 * alpha + r2 * (1.0 - alpha))
+        g = int(g1 * alpha + g2 * (1.0 - alpha))
+        b = int(b1 * alpha + b2 * (1.0 - alpha))
+        return f"#{min(255, max(0, r)):02x}{min(255, max(0, g)):02x}{min(255, max(0, b)):02x}"
+    except Exception:
+        return fg_hex
+
 # ============================================================
 # 120 FPS ULTRA-PERFORMANCE QUARTZ ACTIVE JOBS CANVAS
 # ============================================================
@@ -1071,10 +1088,11 @@ class QuartzActiveJobsCanvas(tk.Canvas):
     CARD_GAP = 4
     ROW_STEP = 38
 
-    def __init__(self, master, **kwargs):
+    def __init__(self, master, on_layout_needed=None, **kwargs):
         super().__init__(master, bg=CARD_BG, bd=0, highlightthickness=0, relief="flat", **kwargs)
         self.jobs = {}
         self.job_order = []
+        self.on_layout_needed = on_layout_needed
         self._anim_job = None
         self._last_tween_time = 0.0
         self.scroller = QuartzKineticScroller(
@@ -1112,33 +1130,17 @@ class QuartzActiveJobsCanvas(tk.Canvas):
         except Exception:
             return "#1e2c33"
 
-    def _get_progress_points(self, x1, y1, fill_x, y2, max_x2, radius=8):
-        """Constructs a smooth, anti-aliased polygon filling the card with rounded corners."""
-        if fill_x <= x1 + 1:
-            return []
-        r = min(radius, (y2 - y1) / 2)
-        eff_fill = min(max_x2, fill_x)
-        r_left = min(r, max(0.5, eff_fill - x1))
-        is_full = (eff_fill >= max_x2 - 1)
-        pts = []
-        for i in range(9):
-            ang = math.radians(180 + 90 * i / 8)
-            pts.extend([x1 + r_left + r_left * math.cos(ang), y1 + r_left + r_left * math.sin(ang)])
-        if is_full:
-            r_right = r
-            for i in range(9):
-                ang = math.radians(270 + 90 * i / 8)
-                pts.extend([max_x2 - r_right + r_right * math.cos(ang), y1 + r_right + r_right * math.sin(ang)])
-            for i in range(9):
-                ang = math.radians(0 + 90 * i / 8)
-                pts.extend([max_x2 - r_right + r_right * math.cos(ang), y2 - r_right + r_right * math.sin(ang)])
-        else:
-            pts.extend([eff_fill, y1])
-            pts.extend([eff_fill, y2])
-        for i in range(9):
-            ang = math.radians(90 + 90 * i / 8)
-            pts.extend([x1 + r_left + r_left * math.cos(ang), y2 - r_left + r_left * math.sin(ang)])
-        return pts
+    def _get_progress_rect_params(self, x1, y1, x2, y2, fill_x, radius=8):
+        """Constructs an ultra-smooth rounded progress rect matching the card's native corner curvature."""
+        if fill_x <= x1 + 0.5:
+            return None, 0.0
+        r = max(1.0, min(float(radius), (x2 - x1) / 2.0, (y2 - y1) / 2.0))
+        stroke_w = r * 2.0
+        cx1 = x1 + r
+        cy1 = y1 + r
+        cy2 = y2 - r
+        cx2 = max(cx1, min(float(x2 - r), fill_x - r))
+        return [cx1, cy1, cx2, cy1, cx2, cy2, cx1, cy2], stroke_w
 
     def _start_tween(self):
         if self._anim_job is None:
@@ -1146,42 +1148,108 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             self._tween_step()
 
     def _tween_step(self):
-        """Critically damped spring tweening providing smooth ease-in & ease-out interpolation."""
+        """Critically damped spring tweening & smooth exit fade/collapse interpolation."""
         self._anim_job = None
         now = time.perf_counter()
         dt = min(0.05, max(0.001, now - self._last_tween_time))
         self._last_tween_time = now
 
         still_animating = False
+        needs_full_redraw = False
+        dead_ids = []
+
         for iid in list(self.job_order):
             job = self.jobs.get(iid)
             if not job: continue
-            target = job.get("target_pct", 0.0)
-            cur = job.get("cur_pct", 0.0)
-            vel = job.get("velocity", 0.0)
 
-            if abs(target - cur) > 0.04 or abs(vel) > 0.1:
-                omega = 2.0 / 0.22
-                x = omega * dt
-                exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x)
-                change = cur - target
-                temp = (vel + omega * change) * dt
-                new_vel = (vel - omega * temp) * exp
-                new_cur = target + (change + temp) * exp
+            state = job.get("state", "active")
 
-                if abs(target - new_cur) < 0.05 and abs(new_vel) < 0.2:
-                    new_cur = target
-                    new_vel = 0.0
-                else:
-                    still_animating = True
+            if state == "holding":
+                still_animating = True
+                if (now - job.get("hold_start", now)) >= job.get("hold_duration", 0.85):
+                    job["state"] = "fading"
+                    job["fade_start"] = now
+                    needs_full_redraw = True
+            elif state == "fading":
+                still_animating = True
+                needs_full_redraw = True
+                elapsed = now - job.get("fade_start", now)
+                dur = job.get("exit_duration", 0.38)
+                p = min(1.0, elapsed / dur) if dur > 0 else 1.0
 
-                job["cur_pct"] = new_cur
-                job["velocity"] = new_vel
-                self._update_job_pbar(iid, new_cur)
-            elif cur != target:
-                job["cur_pct"] = target
-                job["velocity"] = 0.0
-                self._update_job_pbar(iid, target)
+                ease_p = p * p * (3.0 - 2.0 * p)
+                job["alpha"] = max(0.0, 1.0 - min(1.0, p * 1.25))
+                job["height_factor"] = max(0.0, 1.0 - ease_p)
+
+                if p >= 1.0:
+                    job["state"] = "dead"
+                    dead_ids.append(iid)
+
+            if state in ("active", "holding"):
+                target = job.get("target_pct", 0.0)
+                cur = job.get("cur_pct", 0.0)
+                vel = job.get("velocity", 0.0)
+
+                if abs(target - cur) > 0.04 or abs(vel) > 0.1:
+                    omega = 2.0 / 0.22
+                    x = omega * dt
+                    exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x)
+                    change = cur - target
+                    temp = (vel + omega * change) * dt
+                    new_vel = (vel - omega * temp) * exp
+                    new_cur = target + (change + temp) * exp
+
+                    if abs(target - new_cur) < 0.05 and abs(new_vel) < 0.2:
+                        new_cur = target
+                        new_vel = 0.0
+                    else:
+                        still_animating = True
+
+                    job["cur_pct"] = new_cur
+                    job["velocity"] = new_vel
+                    if not needs_full_redraw:
+                        self._update_job_pbar(iid, new_cur)
+                elif cur != target:
+                    job["cur_pct"] = target
+                    job["velocity"] = 0.0
+                    if not needs_full_redraw:
+                        self._update_job_pbar(iid, target)
+
+            if job.get("is_done_ui") and "metrics_fade_start" in job:
+                try:
+                    elapsed_mf = now - job["metrics_fade_start"]
+                    mf_dur = 0.40
+                    mf_p = min(1.0, max(0.0, elapsed_mf / mf_dur))
+                    if mf_p < 1.0:
+                        still_animating = True
+                    card_alpha = job.get("alpha", 1.0)
+                    if mf_p <= 0.40:
+                        fade_alpha = max(0.0, 1.0 - (mf_p / 0.40))
+                        cur_txt = job.get("old_metrics", "")
+                    else:
+                        fade_alpha = min(1.0, (mf_p - 0.40) / 0.60)
+                        cur_txt = job.get("done_metrics", "Completed")
+                    eff_alpha = fade_alpha * card_alpha
+                    txt_col = blend_hex("#9ea8ad", DONE_BG, eff_alpha)
+                    self.itemconfig(f"metrics_{iid}", text=cur_txt, fill=txt_col)
+                    if not needs_full_redraw:
+                        pct_col = blend_hex(DONE_GREEN, CARD_BG, card_alpha)
+                        self.itemconfig(f"pct_{iid}", text="100%", fill=pct_col)
+                except tk.TclError:
+                    pass
+
+        if dead_ids:
+            for di in dead_ids:
+                self.jobs.pop(di, None)
+                if di in self.job_order:
+                    self.job_order.remove(di)
+            needs_full_redraw = True
+            if self.on_layout_needed:
+                try: self.on_layout_needed()
+                except Exception: pass
+
+        if needs_full_redraw:
+            self.redraw_all()
 
         if still_animating:
             self._anim_job = self.after(12, self._tween_step)
@@ -1192,13 +1260,34 @@ class QuartzActiveJobsCanvas(tk.Canvas):
         x1, y1, x2, y2 = job["bounds"]
         w = x2 - x1
         fill_x = x1 + max(0.0, min(w, w * (pct / 100.0)))
-        pts = self._get_progress_points(x1, y1, fill_x, y2, x2, radius=8)
+        card_h = y2 - y1
+        rad = max(1.0, min(8.0, card_h / 2.0))
+        pts, stroke_w = self._get_progress_rect_params(x1, y1, x2, y2, fill_x, radius=rad)
+        tag = f"pbar_fill_{item_id}"
+        if not pts:
+            try:
+                self.itemconfigure(tag, state="hidden")
+            except tk.TclError:
+                pass
+            return
         try:
-            if pts:
-                self.coords(f"pbar_fill_{item_id}", *pts)
-                self.itemconfigure(f"pbar_fill_{item_id}", state="normal")
+            is_done = job.get("is_complete", False) or job.get("is_done_ui", False) or (pct >= 99.95)
+            alpha = job.get("alpha", 1.0)
+            p_col = blend_hex(DONE_BG, CARD_BG, alpha) if is_done else blend_hex(self._get_progress_color(), CARD_BG, alpha)
+            if not self.find_withtag(tag):
+                self.create_polygon(
+                    pts, fill=p_col, outline=p_col, width=stroke_w,
+                    joinstyle=tk.ROUND, state="normal",
+                    tags=("pbar_fill", tag)
+                )
+                if self.find_withtag(f"card_{item_id}"):
+                    self.tag_raise(tag, f"card_{item_id}")
+                for text_tag in (f"title_{item_id}", f"metrics_{item_id}", f"pct_{item_id}"):
+                    if self.find_withtag(text_tag):
+                        self.tag_raise(text_tag)
             else:
-                self.itemconfigure(f"pbar_fill_{item_id}", state="hidden")
+                self.coords(tag, *pts)
+                self.itemconfigure(tag, fill=p_col, outline=p_col, width=stroke_w, joinstyle=tk.ROUND, state="normal")
         except tk.TclError:
             pass
 
@@ -1208,63 +1297,139 @@ class QuartzActiveJobsCanvas(tk.Canvas):
         self.jobs[item_id] = {
             "id": item_id, "title": display_title, "tag": tag,
             "target_pct": 0.0, "cur_pct": 0.0, "velocity": 0.0,
-            "t_str": "00:00 / --:--", "s_str": "0.0x", "f_str": "0 fps", "eta_str": "ETA: --:--"
+            "t_str": "00:00 / --:--", "s_str": "0.0x", "f_str": "0 fps", "eta_str": "ETA: --:--",
+            "state": "active", "alpha": 1.0, "height_factor": 1.0, "is_complete": False
         }
         self.redraw_all()
 
     def update_progress(self, item_id, pct, t_str, s_str, f_str, eta_str):
         job = self.jobs.get(item_id)
-        if not job: return
+        if not job or job.get("state") in ("holding", "fading", "dead"): return
         clean_t = t_str.replace("Time: ", "").strip()
         clean_s = s_str.replace("Speed: ", "").strip()
         clean_f = f_str.replace("FPS: ", "").strip() + (" fps" if not f_str.endswith("fps") else "")
+        target_p = max(0.0, min(100.0, float(pct)))
         job.update({
-            "target_pct": max(job.get("target_pct", 0.0), min(100.0, float(pct))),
+            "target_pct": target_p,
             "t_str": clean_t, "s_str": clean_s, "f_str": clean_f, "eta_str": eta_str
         })
-        self.itemconfig(f"pct_{item_id}", text=f"{pct:.1f}%")
-        metrics_txt = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
-        self.itemconfig(f"metrics_{item_id}", text=metrics_txt)
+        if target_p < job.get("cur_pct", 0.0) - 4.0:
+            job["cur_pct"] = target_p
+            job["velocity"] = 0.0
+            self._update_job_pbar(item_id, target_p)
+        if target_p >= 99.95:
+            target_p = 100.0
+            job["target_pct"] = 100.0
+            job["is_done_ui"] = True
+            if "metrics_fade_start" not in job:
+                job["metrics_fade_start"] = time.perf_counter()
+                job["old_metrics"] = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
+                job["done_metrics"] = f"{clean_t}  •  Completed" if clean_t else "Completed"
+            self.itemconfig(f"pct_{item_id}", text="100%", fill=DONE_GREEN)
+            self._update_job_pbar(item_id, 100.0)
+        else:
+            self.itemconfig(f"pct_{item_id}", text=f"{pct:.1f}%", fill=ULTRA_TEXT)
+            metrics_txt = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
+            self.itemconfig(f"metrics_{item_id}", text=metrics_txt)
         self._start_tween()
 
-    def end_job(self, item_id):
-        self.jobs.pop(item_id, None)
-        if item_id in self.job_order:
-            self.job_order.remove(item_id)
-        if not self.job_order and self._anim_job:
-            try: self.after_cancel(self._anim_job)
-            except Exception: pass
-            self._anim_job = None
+    def end_job(self, item_id, completed=True):
+        job = self.jobs.get(item_id)
+        if not job:
+            if item_id in self.job_order:
+                self.job_order.remove(item_id)
+            self.redraw_all()
+            return
+
+        if job.get("state") in ("holding", "fading", "dead"):
+            return
+
+        now = time.perf_counter()
+        if completed:
+            job["is_complete"] = True
+            job["is_done_ui"] = True
+            job["target_pct"] = 100.0
+            job["cur_pct"] = 100.0
+            if "metrics_fade_start" not in job:
+                job["metrics_fade_start"] = now
+                clean_t = job.get("t_str", "")
+                clean_s = job.get("s_str", "")
+                clean_f = job.get("f_str", "")
+                clean_eta = job.get("eta_str", "")
+                job["old_metrics"] = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {clean_eta}" if (clean_s or clean_f) else (f"{clean_t}  •  Completed" if clean_t else "Completed")
+                job["done_metrics"] = f"{clean_t}  •  Completed" if clean_t else "Completed"
+            job["state"] = "holding"
+            job["hold_start"] = now
+            job["hold_duration"] = 0.85
+            job["exit_duration"] = 0.38
+        else:
+            job["state"] = "fading"
+            job["fade_start"] = now
+            job["exit_duration"] = 0.18
+
         self.redraw_all()
+        self._start_tween()
 
     def job_count(self):
-        return len(self.job_order)
-
-    def _rounded_rect_points(self, x1, y1, x2, y2, radius=8):
-        r = max(0.5, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
-        points = []
-        for cx, cy, sa, ea in [
-            (x2 - r, y1 + r, -90, 0),
-            (x2 - r, y2 - r, 0, 90),
-            (x1 + r, y2 - r, 90, 180),
-            (x1 + r, y1 + r, 180, 270)
-        ]:
-            for i in range(16):
-                ang = math.radians(sa + (ea - sa) * i / 15)
-                points.append(cx + r * math.cos(ang))
-                points.append(cy + r * math.sin(ang))
-        return points
+        return len([iid for iid in self.job_order if self.jobs.get(iid, {}).get("state") != "dead"])
 
     def _draw_rounded_rect(self, x1, y1, x2, y2, radius=8, **kwargs):
-        points = self._rounded_rect_points(x1, y1, x2, y2, radius)
-        kwargs.pop("smooth", None)
-        return self.create_polygon(points, smooth=False, **kwargs)
+        r = max(1.0, min(float(radius), (x2 - x1) / 2.0, (y2 - y1) / 2.0))
+        fill_col = kwargs.get("fill")
+        border_col = kwargs.get("outline")
+        border_w = max(1, int(round(float(kwargs.get("width", 1.0) or 1.0))))
+        tags = kwargs.get("tags")
+
+        has_border = bool(border_col and border_col != "" and border_col != fill_col and border_w > 0)
+
+        if has_border:
+            cx1, cy1 = x1 + r, y1 + r
+            cx2, cy2 = x2 - r, y2 - r
+            if cx2 < cx1:
+                cx1 = cx2 = (x1 + x2) / 2.0
+            if cy2 < cy1:
+                cy1 = cy2 = (y1 + y2) / 2.0
+            self.create_polygon(
+                cx1, cy1, cx2, cy1, cx2, cy2, cx1, cy2,
+                fill=border_col, outline=border_col, width=r * 2.0,
+                joinstyle=tk.ROUND, tags=tags
+            )
+
+            inner_r = max(0.5, r - border_w)
+            bw = r - inner_r
+            ix1, iy1 = x1 + bw, y1 + bw
+            ix2, iy2 = x2 - bw, y2 - bw
+            icx1, icy1 = ix1 + inner_r, iy1 + inner_r
+            icx2, icy2 = ix2 - inner_r, iy2 - inner_r
+            if icx2 < icx1:
+                icx1 = icx2 = (ix1 + ix2) / 2.0
+            if icy2 < icy1:
+                icy1 = icy2 = (iy1 + icy2) / 2.0
+            return self.create_polygon(
+                icx1, icy1, icx2, icy1, icx2, icy2, icx1, icy2,
+                fill=fill_col, outline=fill_col, width=inner_r * 2.0,
+                joinstyle=tk.ROUND, tags=tags
+            )
+        else:
+            col = fill_col or border_col or "#000000"
+            cx1, cy1 = x1 + r, y1 + r
+            cx2, cy2 = x2 - r, y2 - r
+            if cx2 < cx1:
+                cx1 = cx2 = (x1 + x2) / 2.0
+            if cy2 < cy1:
+                cy1 = cy2 = (y1 + y2) / 2.0
+            return self.create_polygon(
+                cx1, cy1, cx2, cy1, cx2, cy2, cx1, cy2,
+                fill=col, outline=col, width=r * 2.0,
+                joinstyle=tk.ROUND, tags=tags
+            )
 
     def redraw_all(self):
         self.delete("all")
         w = max(200, self.winfo_width())
         total_items = len(self.job_order)
-        total_h = max(1, total_items * self.ROW_STEP + 4)
+        content_h = sum(self.ROW_STEP * self.jobs.get(iid, {}).get("height_factor", 1.0) for iid in self.job_order)
+        total_h = max(1, int(round(content_h)) + 4)
         self.configure(scrollregion=(0, 0, w, total_h))
         if total_items == 0:
             try: ch = float(self.cget("height"))
@@ -1275,50 +1440,103 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                 self.scroller.sync_position()
             return
 
-        p_col = self._get_progress_color()
+        base_p_col = self._get_progress_color()
+        cur_y = 3.0
 
-        for idx, iid in enumerate(self.job_order):
-            job = self.jobs[iid]
-            y1 = idx * self.ROW_STEP + 3
-            y2 = y1 + self.CARD_H
+        for iid in list(self.job_order):
+            job = self.jobs.get(iid)
+            if not job: continue
+
+            h_factor = job.get("height_factor", 1.0)
+            if h_factor <= 0.005:
+                continue
+
+            alpha = job.get("alpha", 1.0)
+            card_h = self.CARD_H * h_factor
+            y1 = cur_y
+            y2 = y1 + card_h
             x1, x2 = 4, w - 4
             job["bounds"] = (x1, y1, x2, y2)
+            cur_y += self.ROW_STEP * h_factor
+
+            cur_pct = job.get("cur_pct", 0.0)
+            target_pct = job.get("target_pct", 0.0)
+
+            bg_target = CARD_BG
+            sh1_col = blend_hex("#090a0d", bg_target, alpha)
+            sh2_col = blend_hex("#07080a", bg_target, alpha)
+            sh3_col = blend_hex("#050507", bg_target, alpha)
+            card_bg = blend_hex("#161616", bg_target, alpha)
+
+            is_comp = job.get("is_complete", False) or job.get("is_done_ui", False) or (cur_pct >= 99.95) or (target_pct >= 99.95)
+            if is_comp:
+                p_col = blend_hex(DONE_BG, bg_target, alpha)
+            else:
+                p_col = blend_hex(base_p_col, bg_target, alpha)
+
+            rad = max(1.0, min(8.0, card_h / 2.0))
 
             # 1. Drop shadows
-            self._draw_rounded_rect(x1 - 1, y1 + 1, x2 + 1, y2 + 3, radius=9, fill="#090a0d", outline="", tags=("shadow", f"shadow_{iid}"))
-            self._draw_rounded_rect(x1, y1 + 1, x2, y2 + 2, radius=8, fill="#07080a", outline="", tags=("shadow", f"shadow_{iid}"))
-            self._draw_rounded_rect(x1, y1 + 1, x2, y2 + 1, radius=8, fill="#050507", outline="", tags=("shadow", f"shadow_{iid}"))
+            if alpha > 0.08 and card_h > 8:
+                self._draw_rounded_rect(x1 - 1, y1 + 1, x2 + 1, y2 + 3, radius=rad, fill=sh1_col, outline="", tags=("shadow", f"shadow_{iid}"))
+                self._draw_rounded_rect(x1, y1 + 1, x2, y2 + 2, radius=rad, fill=sh2_col, outline="", tags=("shadow", f"shadow_{iid}"))
+                self._draw_rounded_rect(x1, y1 + 1, x2, y2 + 1, radius=rad, fill=sh3_col, outline="", tags=("shadow", f"shadow_{iid}"))
 
             # 2. Card base background
-            self._draw_rounded_rect(x1, y1, x2, y2, radius=8, fill="#161616", outline="", width=0, tags=("card", f"card_{iid}"))
+            self._draw_rounded_rect(x1, y1, x2, y2, radius=rad, fill=card_bg, outline="", width=0, tags=("card", f"card_{iid}"))
 
             # 3. Full-width faded progress fill BEHIND text
-            cur_pct = job.get("cur_pct", 0.0)
             fill_x = x1 + (x2 - x1) * (cur_pct / 100.0)
-            pts = self._get_progress_points(x1, y1, fill_x, y2, x2, radius=8)
-            if pts:
-                self.create_polygon(pts, fill=p_col, outline="", smooth=False, state="normal", tags=("pbar_fill", f"pbar_fill_{iid}"))
-            else:
-                dummy_pts = [x1, y1, x1, y2, x1, y2, x1, y1]
-                self.create_polygon(dummy_pts, fill=p_col, outline="", smooth=False, state="hidden", tags=("pbar_fill", f"pbar_fill_{iid}"))
-
-            tag_str = f"[{job['tag']}] " if job.get("tag") else ""
-            raw_title = f"{tag_str}{job['title']}"
-            disp_pct = job.get("target_pct", cur_pct)
-            cy = (y1 + y2) / 2
+            pts, stroke_w = self._get_progress_rect_params(x1, y1, x2, y2, fill_x, radius=rad)
+            dummy_pts = [x1, y1, x1, y1, x1, y1, x1, y1]
+            self.create_polygon(
+                pts if pts else dummy_pts,
+                fill=p_col, outline=p_col,
+                width=stroke_w if pts else 0,
+                joinstyle=tk.ROUND,
+                state="normal" if pts else "hidden",
+                tags=("pbar_fill", f"pbar_fill_{iid}")
+            )
 
             # 4. Text & Metrics drawn on top, vertically centered
-            pct_x = x2 - 12
-            metrics_x = pct_x - 52
-            self.create_text(pct_x, cy, text=f"{disp_pct:.1f}%", fill=ULTRA_TEXT, anchor="e", font=("SF Pro Text", 10, "bold"), tags=("pct", f"pct_{iid}"))
+            if alpha > 0.12 and card_h > 12:
+                tag_str = f"[{job['tag']}] " if job.get("tag") else ""
+                raw_title = f"{tag_str}{job['title']}"
+                disp_pct = job.get("target_pct", cur_pct)
+                cy = (y1 + y2) / 2
 
-            metrics_txt = f"{job.get('t_str')}  •  {job.get('s_str')}  •  {job.get('f_str')}  •  {job.get('eta_str')}"
-            self.create_text(metrics_x, cy, text=metrics_txt, fill="#9ea8ad", anchor="e", font=("SF Mono", 9), tags=("metrics", f"metrics_{iid}"))
+                pct_col_raw = DONE_GREEN if is_comp else ULTRA_TEXT
+                pct_col = blend_hex(pct_col_raw, bg_target, alpha)
+                pct_x = x2 - 12
+                metrics_x = pct_x - 52
+                disp_pct_str = "100%" if (is_comp or disp_pct >= 99.95) else f"{disp_pct:.1f}%"
+                self.create_text(pct_x, cy, text=disp_pct_str, fill=pct_col, anchor="e", font=("SF Pro Text", 10, "bold"), tags=("pct", f"pct_{iid}"))
 
-            avail_w = max(60, (metrics_x - 10) - (x1 + 12) - 150)
-            max_chars = max(10, int(avail_w / 7.2))
-            disp_title = raw_title[:max_chars - 3] + "..." if len(raw_title) > max_chars else raw_title
-            self.create_text(x1 + 12, cy, text=disp_title, fill=TEXT_PRIMARY, anchor="w", font=("SF Pro Text", 10, "bold"), tags=("title", f"title_{iid}"))
+                if is_comp:
+                    if "metrics_fade_start" in job:
+                        elapsed_mf = time.perf_counter() - job["metrics_fade_start"]
+                        mf_p = min(1.0, max(0.0, elapsed_mf / 0.40))
+                        if mf_p <= 0.40:
+                            fade_alpha = max(0.0, 1.0 - (mf_p / 0.40))
+                            metrics_txt = job.get("old_metrics", "")
+                        else:
+                            fade_alpha = min(1.0, (mf_p - 0.40) / 0.60)
+                            metrics_txt = job.get("done_metrics", "Completed")
+                        metrics_col = blend_hex(blend_hex("#9ea8ad", DONE_BG, fade_alpha), bg_target, alpha)
+                    else:
+                        clean_t = job.get("t_str", "")
+                        metrics_txt = f"{clean_t}  •  Completed" if clean_t else "Completed"
+                        metrics_col = blend_hex("#9ea8ad", bg_target, alpha)
+                else:
+                    metrics_txt = f"{job.get('t_str')}  •  {job.get('s_str')}  •  {job.get('f_str')}  •  {job.get('eta_str')}"
+                    metrics_col = blend_hex("#9ea8ad", bg_target, alpha)
+                self.create_text(metrics_x, cy, text=metrics_txt, fill=metrics_col, anchor="e", font=("SF Mono", 9), tags=("metrics", f"metrics_{iid}"))
+
+                title_col = blend_hex(TEXT_PRIMARY, bg_target, alpha)
+                avail_w = max(60, (metrics_x - 10) - (x1 + 12) - 150)
+                max_chars = max(10, int(avail_w / 7.2))
+                disp_title = raw_title[:max_chars - 3] + "..." if len(raw_title) > max_chars else raw_title
+                self.create_text(x1 + 12, cy, text=disp_title, fill=title_col, anchor="w", font=("SF Pro Text", 10, "bold"), tags=("title", f"title_{iid}"))
 
         if not self.scroller.is_animating:
             self.scroller.sync_position()
@@ -1327,11 +1545,6 @@ class QuartzActiveJobsCanvas(tk.Canvas):
         self.redraw_all()
 
 
-# ============================================================
-# 120 FPS ULTRA-PERFORMANCE QUARTZ QUEUE CANVAS (WITH INSPECT)
-# ============================================================
-# 120 FPS ULTRA-PERFORMANCE QUARTZ QUEUE CANVAS (WITH VIEWPORT CULLING)
-# ============================================================
 class QuartzQueueCanvas(tk.Canvas):
     ROW_H = 36
     ROW_GAP = 4
@@ -1429,20 +1642,7 @@ class QuartzQueueCanvas(tk.Canvas):
         rendered_id_set = set(self.rendered_rows.values())
         for iid in changed_ids:
             if iid in rendered_id_set:
-                is_sel = (iid in self.selected_ids)
-                row_fill = ULTRA_BG if is_sel else "#161616"
-                row_outline = ULTRA_TEXT if is_sel else ""
-                row_width = 1.5 if is_sel else 0
-                self.itemconfig(f"row_{iid}", fill=row_fill, outline=row_outline, width=row_width)
-                item = self.item_map.get(iid)
-                status = item.get("status", "queued") if item else "queued"
-                if status == "queued":
-                    bg_col = ULTRA_BG if is_sel else "#1c1c1c"
-                    out_col = ULTRA_BORDER if is_sel else "#2a2a2a"
-                    txt_col = ULTRA_TEXT if is_sel else "#858585"
-                    txt = "SELECTED" if is_sel else "QUEUED"
-                    self.itemconfig(f"badge_bg_{iid}", fill=bg_col, outline=out_col)
-                    self.itemconfig(f"badge_txt_{iid}", text=txt, fill=txt_col)
+                self._redraw_row(iid)
 
     def _redraw_row(self, item_id):
         idx = next((i for i, it in enumerate(self.items) if it["id"] == item_id), None)
@@ -1458,30 +1658,7 @@ class QuartzQueueCanvas(tk.Canvas):
         item["status"] = status
         if ptext is not None: item["progress_text"] = ptext
         if done_stats is not None: item["done_stats"] = done_stats
-
-        if status in ("completed", "failed", "cancelled"):
-            self._redraw_row(item_id)
-            return
-
-        pt = item.get("progress_text")
-        if status == "encoding":
-            txt, bg_col, out_col, txt_col, del_state = f"ENCODING {pt}" if pt else "ENCODING", ULTRA_BG, ULTRA_BORDER, ULTRA_TEXT, "normal"
-        elif status == "suspended":
-            txt, bg_col, out_col, txt_col, del_state = f"ON HOLD {pt}" if pt else "ON HOLD", HOLD_BG, HOLD_BORDER, HOLD_TEXT, "normal"
-        elif status == "completed":
-            txt, bg_col, out_col, txt_col, del_state = "DONE", DONE_BG, DONE_BORDER, DONE_GREEN, "hidden"
-        elif status == "failed":
-            txt, bg_col, out_col, txt_col, del_state = "FAILED", "#450a0a", "#7f1d1d", "#f87171", "hidden"
-        elif status == "cancelled":
-            txt, bg_col, out_col, txt_col, del_state = "SKIPPED", HOLD_BG, HOLD_BORDER, HOLD_TEXT, "hidden"
-        else:
-            txt, bg_col, out_col, txt_col, del_state = "QUEUED", "#1e293b", "#334155", "#94a3b8", "normal"
-
-        self.itemconfig(f"badge_bg_{item_id}", fill=bg_col, outline=out_col)
-        self.itemconfig(f"badge_txt_{item_id}", text=txt, fill=txt_col)
-        if self.find_withtag(f"del_btn_{item_id}"):
-            self.itemconfigure(f"del_btn_{item_id}", state=del_state)
-            self.itemconfigure(f"del_txt_{item_id}", state=del_state)
+        self._redraw_row(item_id)
 
     def _get_visible_range(self):
         total_items = len(self.items)
@@ -1676,20 +1853,55 @@ class QuartzQueueCanvas(tk.Canvas):
                 self.create_text(cur_x, (y1 + y2) / 2, text=disp_done, fill=DONE_GREEN, anchor="w", font=("SF Pro Text", 10), tags=("done_stats", f"done_stats_{iid}", f"row_item_{iid}"))
 
     def _draw_rounded_rect(self, x1, y1, x2, y2, radius=8, **kwargs):
-        r = max(1, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
-        points = []
-        for cx, cy, sa, ea in [
-            (x2 - r, y1 + r, -90, 0),
-            (x2 - r, y2 - r, 0, 90),
-            (x1 + r, y2 - r, 90, 180),
-            (x1 + r, y1 + r, 180, 270)
-        ]:
-            for i in range(16):
-                ang = math.radians(sa + (ea - sa) * i / 15)
-                points.append(cx + r * math.cos(ang))
-                points.append(cy + r * math.sin(ang))
-        kwargs.pop("smooth", None)
-        return self.create_polygon(points, smooth=False, **kwargs)
+        r = max(1.0, min(float(radius), (x2 - x1) / 2.0, (y2 - y1) / 2.0))
+        fill_col = kwargs.get("fill")
+        border_col = kwargs.get("outline")
+        border_w = max(1, int(round(float(kwargs.get("width", 1.0) or 1.0))))
+        tags = kwargs.get("tags")
+
+        has_border = bool(border_col and border_col != "" and border_col != fill_col and border_w > 0)
+
+        if has_border:
+            cx1, cy1 = x1 + r, y1 + r
+            cx2, cy2 = x2 - r, y2 - r
+            if cx2 < cx1:
+                cx1 = cx2 = (x1 + x2) / 2.0
+            if cy2 < cy1:
+                cy1 = cy2 = (y1 + y2) / 2.0
+            self.create_polygon(
+                cx1, cy1, cx2, cy1, cx2, cy2, cx1, cy2,
+                fill=border_col, outline=border_col, width=r * 2.0,
+                joinstyle=tk.ROUND, tags=tags
+            )
+
+            inner_r = max(0.5, r - border_w)
+            bw = r - inner_r
+            ix1, iy1 = x1 + bw, y1 + bw
+            ix2, iy2 = x2 - bw, y2 - bw
+            icx1, icy1 = ix1 + inner_r, iy1 + inner_r
+            icx2, icy2 = ix2 - inner_r, iy2 - inner_r
+            if icx2 < icx1:
+                icx1 = icx2 = (ix1 + ix2) / 2.0
+            if icy2 < icy1:
+                icy1 = icy2 = (iy1 + icy2) / 2.0
+            return self.create_polygon(
+                icx1, icy1, icx2, icy1, icx2, icy2, icx1, icy2,
+                fill=fill_col, outline=fill_col, width=inner_r * 2.0,
+                joinstyle=tk.ROUND, tags=tags
+            )
+        else:
+            col = fill_col or border_col or "#000000"
+            cx1, cy1 = x1 + r, y1 + r
+            cx2, cy2 = x2 - r, y2 - r
+            if cx2 < cx1:
+                cx1 = cx2 = (x1 + x2) / 2.0
+            if cy2 < cy1:
+                cy1 = cy2 = (y1 + y2) / 2.0
+            return self.create_polygon(
+                cx1, cy1, cx2, cy1, cx2, cy2, cx1, cy2,
+                fill=col, outline=col, width=r * 2.0,
+                joinstyle=tk.ROUND, tags=tags
+            )
 
     def _on_resize(self, event):
         self.redraw_all()
@@ -2772,7 +2984,7 @@ class EncoderApp:
         self.active_jobs_inner.pack(fill="x", expand=True)
 
         self.active_jobs_scrollbar = ctk.CTkScrollbar(self.active_jobs_inner, command=self._on_active_scrollbar_drag, fg_color="transparent", button_color="#262626", button_hover_color="#333333", width=10, height=self.active_jobs_height)
-        self.active_jobs_canvas = QuartzActiveJobsCanvas(self.active_jobs_inner, height=self.active_jobs_height)
+        self.active_jobs_canvas = QuartzActiveJobsCanvas(self.active_jobs_inner, height=self.active_jobs_height, on_layout_needed=self.update_active_jobs_layout)
         self.active_jobs_canvas.pack(side="left", fill="both", expand=True, padx=(0, 2), pady=0)
         self.active_jobs_canvas.configure(yscrollcommand=self._on_active_jobs_scroll_update)
 
@@ -2903,10 +3115,6 @@ class EncoderApp:
             self._manual_window.focus_force()
             return
 
-        win = ctk.CTkToplevel(self.root)
-        self._manual_window = win
-        win.title("MediaEngine - User Manual & Guide")
-        
         # Center the manual directly over the main window
         self.root.update_idletasks()
         rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
@@ -2915,10 +3123,14 @@ class EncoderApp:
         h_manual = min(860, max(600, rh))
         pos_x = max(0, rx + (rw - w_manual) // 2)
         pos_y = max(0, ry + (rh - h_manual) // 2)
+
+        win = ctk.CTkToplevel(self.root)
+        win.withdraw()
+        self._manual_window = win
+        win.title("MediaEngine - User Manual & Guide")
         win.geometry(f"{w_manual}x{h_manual}+{pos_x}+{pos_y}")
         win.minsize(640, 560)
         win.configure(fg_color=BG_MAIN)
-        win.after(100, lambda: win.lift())
 
         top_bar = ctk.CTkFrame(win, fg_color="transparent")
         top_bar.pack(fill="x", padx=16, pady=(12, 8))
@@ -3096,6 +3308,10 @@ class EncoderApp:
             command=win.destroy
         )
         btn_close.pack(side="right")
+
+        win.deiconify()
+        win.lift()
+        win.focus_force()
     # ----------------------------------------------------
     # MEDIA INSPECTOR UI & PARSER
     # ----------------------------------------------------
@@ -3950,7 +4166,7 @@ class EncoderApp:
             logs_buffer = []
             progress_updates = {}
             jobs_to_start = []
-            jobs_to_end = set()
+            jobs_to_end = {}
             latest_state = None
             refresh_stats = False
 
@@ -3959,7 +4175,11 @@ class EncoderApp:
                 event_type, payload = self.ui_queue.get_nowait()
                 if event_type == "log": logs_buffer.append(payload)
                 elif event_type == "job_start": jobs_to_start.append(payload)
-                elif event_type == "job_end": jobs_to_end.add(payload)
+                elif event_type == "job_end":
+                    if isinstance(payload, (list, tuple)):
+                        jobs_to_end[payload[0]] = payload[1]
+                    else:
+                        jobs_to_end[payload] = False
                 elif event_type == "progress":
                     item_id, pdata = payload
                     progress_updates[item_id] = pdata
@@ -3991,8 +4211,8 @@ class EncoderApp:
             for item_id, (pct, t_str, s_str, f_str, eta_str) in progress_updates.items():
                 self.active_jobs_canvas.update_progress(item_id, pct, t_str, s_str, f_str, eta_str)
 
-            for item_id in jobs_to_end:
-                self.active_jobs_canvas.end_job(item_id)
+            for item_id, is_completed in jobs_to_end.items():
+                self.active_jobs_canvas.end_job(item_id, completed=is_completed)
 
             if jobs_to_start or jobs_to_end:
                 self.update_active_jobs_layout()
@@ -4886,8 +5106,12 @@ class EncoderApp:
         if not v_stream:
             v_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
         if v_stream:
-            if duration <= 0.0 and "duration" in v_stream:
-                try: duration = max(0.0, float(v_stream["duration"]))
+            if "duration" in v_stream:
+                try: duration = max(duration, float(v_stream["duration"]))
+                except ValueError: pass
+        for s in streams:
+            if "duration" in s:
+                try: duration = max(duration, float(s["duration"]))
                 except ValueError: pass
             if "width" in v_stream:
                 try: width = int(v_stream["width"])
@@ -5529,6 +5753,9 @@ class EncoderApp:
             prefix = ["nice", "-n", "15"] if shutil.which("nice") else []
 
             for attempt in range(4):
+                if attempt > 0:
+                    self.last_pct_map[item_id] = 0.0
+                    self.update_progress_ui(item_id, 0.0, "00:00 / --:--", "0.0x", "0 fps", "ETA: --:--")
                 stderr_lines = deque(maxlen=1000)
                 exec_cmd = prefix + cmd if prefix else cmd
                 with self.hw_launch_lock:
@@ -5619,7 +5846,17 @@ class EncoderApp:
                     watchdog_thread = threading.Thread(target=vt_watchdog, args=(proc,), daemon=True)
                     watchdog_thread.start()
 
-                cur_sec, speed, fps_display, last_progress_push = 0.0, "1.0x", "0", 0.0
+                v_s0 = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video" and (s.get("disposition", {}) or {}).get("attached_pic") != 1), None)
+                total_frames = 0
+                if v_s0:
+                    try: total_frames = int(v_s0.get("nb_frames") or 0)
+                    except (ValueError, TypeError): total_frames = 0
+                if total_frames <= 0 and duration > 0 and fps > 0:
+                    total_frames = int(round(duration * fps))
+
+                cur_sec, raw_time_sec, cur_frame = 0.0, 0.0, 0
+                max_cur_sec, max_pct = 0.0, 0.0
+                speed, fps_display, last_progress_push = "1.0x", "0", 0.0
                 for line in iter(proc.stdout.readline, ''):
                     if not line: break
                     first_frame_seen[0] = True
@@ -5627,14 +5864,17 @@ class EncoderApp:
                     line = line.strip()
                     if "=" in line:
                         k, v = [x.strip() for x in line.split("=", 1)]
-                        if k == "out_time_us":
-                            try: cur_sec = max(0.0, int(v) / 1_000_000.0)
+                        if k == "frame":
+                            try: cur_frame = max(cur_frame, int(v))
+                            except ValueError: pass
+                        elif k == "out_time_us":
+                            try: raw_time_sec = max(0.0, int(v) / 1_000_000.0)
                             except ValueError: pass
                         elif k == "out_time" and ":" in v:
                             try:
                                 sign = -1.0 if v.startswith("-") else 1.0
                                 p_list = v.lstrip("-+").split(":")
-                                if len(p_list) == 3: cur_sec = max(0.0, sign * (float(p_list[0]) * 3600 + float(p_list[1]) * 60 + float(p_list[2])))
+                                if len(p_list) == 3: raw_time_sec = max(0.0, sign * (float(p_list[0]) * 3600 + float(p_list[1]) * 60 + float(p_list[2])))
                             except ValueError: pass
                         elif k == "speed": speed = v if v and v != "N/A" else "0.0x"
                         elif k == "fps":
@@ -5643,14 +5883,26 @@ class EncoderApp:
                         elif k == "progress":
                             now_t = time.time()
                             if v == "end":
+                                max_pct = 100.0
+                                cur_sec = duration if duration > 0 else max_cur_sec
                                 show_hours = (duration >= 3600) or (cur_sec >= 3600)
-                                t_str = f"Time: {format_time_duration(duration if duration > 0 else cur_sec, show_hours)} / {format_time_duration(duration, show_hours)}"
+                                t_str = f"Time: {format_time_duration(cur_sec, show_hours)} / {format_time_duration(duration if duration > 0 else cur_sec, show_hours)}"
                                 self.update_progress_ui(item_id, 100.0, t_str, f"Speed: {speed}", f"FPS: {fps_display}", "ETA: 00:00")
                                 self.update_item_status_ui(item_id, "encoding", "100%")
+                                break
                             else:
                                 if (now_t - last_progress_push) >= 0.15:
                                     last_progress_push = now_t
-                                    pct = min(99.9, max(0.0, (cur_sec / duration) * 100.0)) if duration > 0 else 0.0
+                                    if has_video and total_frames > 0:
+                                        raw_pct = min(99.9, max(0.0, (cur_frame / float(total_frames)) * 100.0))
+                                        v_sec = (cur_frame / float(fps)) if fps > 0 else raw_time_sec
+                                        cur_sec = max(max_cur_sec, v_sec if v_sec > 0 else raw_time_sec)
+                                    else:
+                                        cur_sec = max(max_cur_sec, raw_time_sec)
+                                        raw_pct = min(99.9, max(0.0, (cur_sec / duration) * 100.0)) if duration > 0 else 0.0
+                                    pct = max(max_pct, raw_pct)
+                                    max_pct = pct
+                                    max_cur_sec = cur_sec
                                     try: sp_val = float(speed.replace("x", "").strip())
                                     except ValueError: sp_val = 0.0
                                     eta_str = format_eta_str(max(0.0, (duration - cur_sec) / sp_val)) if (sp_val > 0 and cur_sec < duration) else "ETA: --:--"
@@ -5770,7 +6022,8 @@ class EncoderApp:
             with self.queue_lock: current_item["status"] = "failed"
             self.update_item_status_ui(item_id, "failed", refresh_stats=True)
         finally:
-            self.ui_queue.put(("job_end", item_id))
+            is_completed = (exit_code == 0 and not is_cancelled)
+            self.ui_queue.put(("job_end", (item_id, is_completed)))
             with self.process_lock:
                 self.active_output_files.pop(item_id, None)
                 self.retrying_ids.discard(item_id)
