@@ -112,6 +112,7 @@ import traceback
 import tkinter as tk
 from tkinter import messagebox, filedialog, colorchooser
 import customtkinter as ctk
+import webbrowser
 
 try:
     import ctypes
@@ -1780,6 +1781,8 @@ class UniversalScrollHandler:
         self.active_jobs_canvas = active_jobs_canvas
         self.log_textbox = log_textbox
         self.inspector_view = inspector_view
+        self.manual_scroller = None
+        self.manual_view = None
 
         for seq in ("<MouseWheel>", "<TouchpadScroll>", "<Button-4>", "<Button-5>"):
             try: self.root.unbind_class("Text", seq)
@@ -1817,6 +1820,9 @@ class UniversalScrollHandler:
                 return "break"
             if is_inside(self.inspector_view) or (hasattr(self.inspector_view, "_textbox") and is_inside(self.inspector_view._textbox)):
                 if self.inspector_scroller: self.inspector_scroller.handle_wheel_input(delta)
+                return "break"
+            if getattr(self, "manual_view", None) and (is_inside(self.manual_view) or (hasattr(self.manual_view, "_textbox") and is_inside(self.manual_view._textbox))):
+                if getattr(self, "manual_scroller", None): self.manual_scroller.handle_wheel_input(delta)
                 return "break"
         except Exception:
             pass
@@ -2177,6 +2183,15 @@ class EncoderApp:
                 tb.tag_configure("sec_h", foreground=ULTRA_TEXT)
             except Exception:
                 pass
+        if hasattr(self, "_manual_window") and self._manual_window and self._manual_window.winfo_exists():
+            for child in self._manual_window.winfo_children():
+                if isinstance(child, ctk.CTkTextbox):
+                    mtb = getattr(child, "_textbox", child)
+                    try:
+                        mtb.tag_configure("sec_h", foreground=ULTRA_TEXT)
+                        mtb.tag_configure("bullet", foreground=ULTRA_TEXT)
+                    except Exception:
+                        pass
         if getattr(self, "inspected_data", None) and getattr(self, "inspected_path", None):
             self._render_inspection(self.inspected_data, self.inspected_path)
 
@@ -2486,12 +2501,17 @@ class EncoderApp:
         header_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         header_frame.pack(fill="x", pady=(0, 10))
 
-        title_lbl = ctk.CTkLabel(
+        self.title_lbl = ctk.CTkLabel(
             header_frame, text="MediaEngine",
             font=ctk.CTkFont(family="SF Pro Display", size=18, weight="bold"),
-            text_color=TEXT_PRIMARY
+            text_color=TEXT_PRIMARY,
+            cursor="hand2"
         )
-        title_lbl.pack(side="left")
+        self.title_lbl.pack(side="left")
+        self.title_lbl.bind("<Button-1>", lambda e: self.open_user_manual())
+        self.title_lbl.bind("<Enter>", lambda e: self.title_lbl.configure(text_color=ULTRA_TEXT))
+        self.title_lbl.bind("<Leave>", lambda e: self.title_lbl.configure(text_color=TEXT_PRIMARY))
+
 
         self.theme_dot = tk.Canvas(header_frame, width=18, height=18, bg=BG_MAIN, bd=0, highlightthickness=0, cursor="hand2")
         self.theme_dot.pack(side="left", padx=(8, 0), pady=(1, 0))
@@ -2877,6 +2897,205 @@ class EncoderApp:
         )
         self.update_action_button_ui()
 
+    def open_user_manual(self):
+        if hasattr(self, "_manual_window") and self._manual_window and self._manual_window.winfo_exists():
+            self._manual_window.lift()
+            self._manual_window.focus_force()
+            return
+
+        win = ctk.CTkToplevel(self.root)
+        self._manual_window = win
+        win.title("MediaEngine - User Manual & Guide")
+        
+        # Center the manual directly over the main window
+        self.root.update_idletasks()
+        rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+        rw, rh = self.root.winfo_width(), self.root.winfo_height()
+        w_manual = min(740, max(640, rw))
+        h_manual = min(860, max(600, rh))
+        pos_x = max(0, rx + (rw - w_manual) // 2)
+        pos_y = max(0, ry + (rh - h_manual) // 2)
+        win.geometry(f"{w_manual}x{h_manual}+{pos_x}+{pos_y}")
+        win.minsize(640, 560)
+        win.configure(fg_color=BG_MAIN)
+        win.after(100, lambda: win.lift())
+
+        top_bar = ctk.CTkFrame(win, fg_color="transparent")
+        top_bar.pack(fill="x", padx=16, pady=(12, 8))
+
+        lbl_top = ctk.CTkLabel(
+            top_bar, text="MediaEngine User Manual",
+            font=ctk.CTkFont(family="SF Pro Display", size=17, weight="bold"),
+            text_color=TEXT_PRIMARY
+        )
+        lbl_top.pack(side="left")
+
+        btn_kofi = ctk.CTkButton(
+            top_bar, text="☕ Support on Ko-fi", width=145, height=30, corner_radius=8,
+            fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER, text_color=TEXT_PRIMARY,
+            font=ctk.CTkFont(family="SF Pro Text", size=12, weight="bold"),
+            command=lambda: webbrowser.open("https://ko-fi.com/jondana")
+        )
+        btn_kofi.pack(side="right")
+
+        manual_text = ctk.CTkTextbox(
+            win,
+            font=ctk.CTkFont(family="SF Pro Text", size=13),
+            fg_color="#0e0e0e",
+            text_color="#e0e0e0",
+            corner_radius=8,
+            border_width=1,
+            border_color="#1e1e1e",
+            wrap="word"
+        )
+        manual_text.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        def get_manual_metrics():
+            tb_inner = getattr(manual_text, "_textbox", None)
+            if not tb_inner or not tb_inner.winfo_ismapped(): return None
+            view_h = float(tb_inner.winfo_height())
+            if view_h <= 0: return None
+            top_frac, bot_frac = tb_inner.yview()
+            vis_frac = max(0.0001, bot_frac - top_frac)
+            return (view_h, view_h, 0.0) if vis_frac >= 0.9999 else (view_h, view_h / vis_frac, top_frac)
+
+        manual_scroller = QuartzKineticScroller(
+            get_view_metrics=get_manual_metrics,
+            set_view_fraction=lambda f: getattr(manual_text, "_textbox").yview_moveto(f) if getattr(manual_text, "_textbox", None) else None,
+            after_fn=manual_text.after,
+            cancel_after_fn=manual_text.after_cancel
+        )
+
+        if hasattr(self, "scroll_handler"):
+            self.scroll_handler.manual_scroller = manual_scroller
+            self.scroll_handler.manual_view = manual_text
+
+        def _on_manual_wheel(event):
+            try:
+                raw_delta = getattr(event, "delta", 0)
+                if getattr(event, "num", None) == 4: raw_delta = 1
+                elif getattr(event, "num", None) == 5: raw_delta = -1
+                if raw_delta != 0:
+                    manual_scroller.handle_wheel_input(float(raw_delta))
+                    return "break"
+            except Exception:
+                pass
+
+        for seq in ("<MouseWheel>", "<TouchpadScroll>", "<Button-4>", "<Button-5>"):
+            try:
+                win.bind(seq, _on_manual_wheel, add="+")
+                manual_text.bind(seq, _on_manual_wheel, add="+")
+                if hasattr(manual_text, "_textbox"):
+                    manual_text._textbox.bind(seq, _on_manual_wheel, add="+")
+            except Exception:
+                pass
+
+        tb = getattr(manual_text, "_textbox", manual_text)
+        tb.configure(state="normal", padx=20, pady=16)
+        tb.delete("1.0", "end")
+
+        tb.tag_configure("sec_h", font=("SF Pro Display", 14, "bold"), foreground=ULTRA_TEXT, spacing1=22, spacing3=6)
+        tb.tag_configure("sec_h_top", font=("SF Pro Display", 14, "bold"), foreground=ULTRA_TEXT, spacing1=2, spacing3=6)
+        tb.tag_configure("intro", font=("SF Pro Text", 12), foreground="#9aa4a9", spacing1=2, spacing2=4, spacing3=10, lmargin1=4, lmargin2=4)
+        tb.tag_configure("item", lmargin1=10, lmargin2=30, tabs=(30,), spacing1=3, spacing2=3, spacing3=5)
+        tb.tag_configure("bullet", font=("SF Pro Text", 12, "bold"), foreground=ULTRA_TEXT)
+        tb.tag_configure("val", font=("SF Pro Text", 12, "bold"), foreground=TEXT_PRIMARY)
+        tb.tag_configure("body", font=("SF Pro Text", 12), foreground="#c4cbcf")
+
+        sections = [
+            ("1. OVERVIEW & ARCHITECTURE",
+             "MediaEngine is engineered specifically for demanding production and cinema workflows (such as 8K Canon Cinema RAW Light & C-Log3), compressing massive takes down to 30–40 Mbps while preserving full 10-bit color accuracy and grading headroom.",
+             [
+                 ("Native Apple Silicon", "Optimized directly for macOS hardware media encode and decode engines."),
+                 ("Zero Ingest Stalls", "Drag in hundreds of clips instantly without preliminary preview stalls or caching delays."),
+                 ("Hardware Constant Quality", "Operates via VideoToolbox -q:v for visual fidelity without arbitrary bitrate limits."),
+                 ("Edit-Ready Masters", "Produces compliant hvc1/avc1 bitstreams with instant playback in DaVinci Resolve and FCP."),
+                 ("Color Science Integrity", "Strictly preserves NCLX color atoms, HDR mastering display (ST 2086), and light levels.")
+             ]),
+
+            ("2. SILICON HARDWARE TIERS & CONCURRENCY",
+             "Encode streams are dynamically budgeted: 8K streams consume 6 resource units (strictly 1 per engine), 4K streams take 2 units, and HD/1440p take 1 unit to prevent GPU lock contention.",
+             [
+                 ("Base / Pro (M1–M4)", "1 Dedicated Hardware Video Encode Engine."),
+                 ("Max Chips", "2 Dedicated Hardware Video Encode Engines."),
+                 ("Ultra Chips", "4 Dedicated Hardware Video Encode Engines."),
+                 ("Sequential Mode", "Strictly 1 job at a time. Ideal for massive 8K masters or heavy background multitasking."),
+                 ("Balanced Mode", "Recommended daily driver. Saturates silicon (2 jobs per engine) via weighted budgeting."),
+                 ("Turbo Mode", "Maximum throughput saturation protected by active RAM and memory pressure guardrails.")
+             ]),
+
+            ("3. RECOMMENDED PRESETS & BEST SETTINGS",
+             "If your Mac tier lacks hardware 10-Bit 4:2:2 encode support, MediaEngine safely falls back to 10-Bit 4:2:0 without crashing or dropping bit depth.",
+             [
+                 ("Log Footage Preset", "HEVC • 10-Bit 4:2:2 • Quality: 69 • Denoise: 10"),
+                 ("Why Q69 for Log?", "Preserves shadow latitude, fine grain structure, and subtle gradations without banding."),
+                 ("Non-Log Preset", "HEVC • 10-Bit 4:2:0 • Quality: 58 • Denoise: 15"),
+                 ("Why Q58 for Rec.709?", "Optimal sweet spot for delivery, web, and archives with high compression and zero visible loss."),
+                 ("Software (CPU) Mode", "libx265 / libx264 with tuned psycho-visual RD, SAO disabled, and AQ mode 3 for deep control.")
+             ]),
+
+            ("4. PERCEPTUAL NOISE REDUCTION (ATADENOISE)",
+             "Denoise Settings Guide: 0 = Off (fastest), 5–10 = Subtle (clean cinema log), 15–22 = Moderate (high-ISO grain).",
+             [
+                 ("Chroma-Biased Filter", "Human vision notices luma edges far more than chroma noise; chroma grain is heavily attenuated."),
+                 ("Bitrate Conservation", "Strips high-frequency sensor noise from dark shadows, saving bitrate for visible detail."),
+                 ("Dynamic Temporal Window", "Averages across 5 to 9 successive frames depending on strength, avoiding motion ghosting."),
+                 ("HDR Safety Bypass", "Temporal denoising is automatically bypassed on HDR (PQ/HLG) to prevent highlight stepping.")
+             ]),
+
+            ("5. TRANSPARENCY & ALPHA PRESERVATION",
+             "Hardware-accelerated ProRes 4444 and animation alpha channel transcoding with zero quality degradation.",
+             [
+                 ("Automatic Alpha Routing", "Detects ProRes 4444, Animation, and PNG sequences with embedded alpha channels."),
+                 ("Hardware Alpha Pipeline", "Premultiplies alpha and routes through 32-bit BGRA VideoToolbox to generate .mov masters."),
+                 ("Ultra-Compact Masters", "Generates transparent HEVC files up to 90% smaller than ProRes 4444.")
+             ]),
+
+            ("6. MEDIA INSPECTOR & SHORTCUTS",
+             "Deep stream inspection, NCLX color atom verification, and production productivity shortcuts.",
+             [
+                 ("Option-Drop (⌥)", "Hold Option while dropping any file or folder to open directly in the Media Inspector."),
+                 ("Deep Media Inspector", "Inspects video/audio streams, NCLX atoms, HDR side data, channel layouts, or raw JSON."),
+                 ("Add to Queue", "One-click button in the Inspector to immediately queue an inspected video."),
+                 ("Per-Item Settings", "Click any queued item to customize its preset, codec, or quality independently."),
+                 ("Multi-Select", "Shift-click to select a range; Cmd-click to toggle multiple queued clips."),
+                 ("Delete / Backspace", "Removes selected queued items from the batch list."),
+                 ("Accent Color Dot", "Click the split-color dot in the header to change theme. Double-click or Option-click to reset.")
+             ]),
+
+            ("7. SUPPORT & CONTRIBUTIONS",
+             "MediaEngine is free and open source under the GNU General Public License v3.0 (GPL-3.0).",
+             [
+                 ("Ko-fi Page", "https://ko-fi.com/jondana"),
+                 ("Author", "Jon Dana (https://github.com/jondana/MediaEngine)"),
+                 ("Contributions", "If this tool saves you time, cuts render hours, or frees up disk space, support on Ko-fi is warmly appreciated!")
+             ])
+        ]
+
+        for sec_idx, (sec_title, intro, items) in enumerate(sections):
+            h_tags = ("sec_h", "sec_h_top") if sec_idx == 0 else "sec_h"
+            tb.insert("end", f"{sec_title}\n", h_tags)
+            if intro:
+                tb.insert("end", f"{intro}\n", "intro")
+            for lbl, val in items:
+                sep = "" if lbl.endswith("?") else ":"
+                tb.insert("end", "•\t", ("bullet", "item"))
+                tb.insert("end", f"{lbl}{sep} ", ("val", "item"))
+                tb.insert("end", f"{val}\n", ("body", "item"))
+
+        tb.configure(state="disabled")
+        win.after(60, manual_scroller.sync_position)
+
+        bottom_bar = ctk.CTkFrame(win, fg_color="transparent")
+        bottom_bar.pack(fill="x", padx=16, pady=(6, 12))
+
+        btn_close = ctk.CTkButton(
+            bottom_bar, text="Close", width=90, height=32, corner_radius=8,
+            fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER, text_color=TEXT_PRIMARY,
+            font=ctk.CTkFont(family="SF Pro Text", size=12, weight="bold"),
+            command=win.destroy
+        )
+        btn_close.pack(side="right")
     # ----------------------------------------------------
     # MEDIA INSPECTOR UI & PARSER
     # ----------------------------------------------------
@@ -2902,21 +3121,12 @@ class EncoderApp:
         self.btn_inspect_to_queue.pack(side="left")
 
         self.btn_inspect_copy = ctk.CTkButton(
-            top_bar, text="📋 Copy Summary", width=130, height=30, corner_radius=8,
+            top_bar, text="Copy Summary", width=130, height=30, corner_radius=8,
             fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER,
             font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"),
             command=self.copy_inspector_summary
         )
         self.btn_inspect_copy.pack(side="right")
-
-        self.btn_inspect_raw = ctk.CTkButton(
-            top_bar, text="Raw JSON", width=100, height=30, corner_radius=8,
-            fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER,
-            font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"),
-            command=self.toggle_raw_json
-        )
-        self.btn_inspect_raw.pack(side="right", padx=(0, 6))
-
         # Quick Specs Badges Bar
         self.badges_bar = ctk.CTkFrame(self.tab_inspector, fg_color="transparent")
         self.badges_bar.pack(fill="x", padx=6, pady=(0, 6))
@@ -2927,7 +3137,7 @@ class EncoderApp:
         # Main Scrollable Display for Inspector with SF Mono typography
         self.inspector_text = ctk.CTkTextbox(
             self.tab_inspector,
-            font=ctk.CTkFont(family="SF Mono", size=11),
+            font=ctk.CTkFont(family="SF Pro Text", size=12),
             fg_color="#0e0e0e",
             text_color="#e0e0e0",
             corner_radius=8,
@@ -2994,31 +3204,13 @@ class EncoderApp:
 
         gap_x = 6
         gap_y = 6
-        row_h = 24
-
-        badge_font = getattr(self, "_badge_font", None)
-        if badge_font is None:
-            try:
-                import tkinter.font as tkfont
-                self._badge_font = tkfont.Font(family="SF Pro Text", size=10, weight="bold")
-                badge_font = self._badge_font
-            except Exception:
-                pass
+        row_h = 30
 
         def get_min_w(b):
-            txt = getattr(b, "_text", None)
-            if txt is None:
-                try:
-                    txt = b.cget("text")
-                except Exception:
-                    txt = ""
-            txt_s = str(txt)
-            if badge_font:
-                try:
-                    return max(40, badge_font.measure(txt_s) + 20)
-                except Exception:
-                    pass
-            return max(40, len(txt_s) * 8 + 20)
+            if hasattr(b, "_min_w"):
+                return b._min_w
+            txt = getattr(b, "_text", "")
+            return max(85, len(str(txt)) * 8 + 20)
 
         min_w_map = {b: get_min_w(b) for b in badges}
 
@@ -3096,36 +3288,59 @@ class EncoderApp:
         total_h = max(row_h, cur_y - gap_y)
         self.badges_bar.configure(height=total_h)
 
-    def add_badge(self, text, bg_col="#1e1e1e", text_col="#dedede", reflow=True):
-        badge = ctk.CTkLabel(
+    def add_stat_card(self, title, value, bg_col, text_col, border_col="#242424", reflow=True):
+        card = ctk.CTkFrame(
             self.badges_bar,
-            text=text,
-            font=ctk.CTkFont(family="SF Pro Text", size=10, weight="bold"),
             fg_color=bg_col,
-            text_color=text_col,
-            corner_radius=5,
-            padx=7,
-            pady=2
+            corner_radius=7,
+            border_width=1,
+            border_color=border_col
         )
+        card.pack_propagate(False)
+
+        # Data value placed to the LEFT of the title word
+        lbl_v = ctk.CTkLabel(
+            card,
+            text=str(value),
+            font=ctk.CTkFont(family="SF Pro Text", size=12, weight="bold"),
+            text_color="#f5f5f7",
+            anchor="w"
+        )
+        lbl_v.pack(side="left", padx=(10, 6))
+
+        lbl_t = ctk.CTkLabel(
+            card,
+            text=str(title).upper(),
+            font=ctk.CTkFont(family="SF Pro Text", size=9, weight="bold"),
+            text_color=text_col,
+            anchor="w"
+        )
+        lbl_t.pack(side="left", padx=(0, 10))
+
+        card._min_w = max(100, (len(str(value)) + len(str(title))) * 7 + 28)
         if not hasattr(self, "_badge_widgets"):
             self._badge_widgets = []
-        self._badge_widgets.append(badge)
+        self._badge_widgets.append(card)
+
         if reflow:
             self._reflow_badges(force=True)
 
-            if hasattr(self, "_reflow_job") and self._reflow_job:
-                try:
-                    self.root.after_cancel(self._reflow_job)
-                except Exception:
-                    pass
-            self._reflow_job = self.root.after(50, lambda: self._reflow_badges(force=True))
+    def add_badge(self, text, bg_col="#1e1e1e", text_col="#dedede", reflow=True):
+        self.add_stat_card("INFO", text, bg_col, text_col, reflow=reflow)
 
     def _on_inspector_resize(self, event=None):
         if not getattr(self, "inspected_data", None):
             self.show_inspector_placeholder()
         else:
-            self._update_inspector_tabs()
+            tb = getattr(self.inspector_text, "_textbox", self.inspector_text)
+            cur_w = tb.winfo_width()
+            last_w = getattr(self, "_last_inspector_w", None)
             self._reflow_badges()
+            if last_w is None or abs(cur_w - last_w) > 30:
+                self._last_inspector_w = cur_w
+                self._update_inspector_tabs()
+                if getattr(self, "inspected_path", None) and not getattr(self, "raw_json_mode", False):
+                    self._render_inspection(self.inspected_data, self.inspected_path)
 
     def show_inspector_placeholder(self):
         self.clear_badges()
@@ -3134,8 +3349,8 @@ class EncoderApp:
         tb.delete("1.0", "end")
         h = tb.winfo_height()
         top_pad = max(20, (h - 26) // 2) if h > 50 else 100
-        tb.tag_configure("ph_text", font=("SF Pro Text", 11), foreground="#8e8e9a", justify="center", spacing1=top_pad)
-        tb.insert("end", "Drop a file to inspect metadata", "ph_text")
+        tb.tag_configure("ph_text", font=("SF Pro Text", 12), foreground="#8e8e9a", justify="center", spacing1=top_pad)
+        tb.insert("end", "Drop a file to inspect metadata\n\nor click 'Choose File...' above", "ph_text")
         tb.configure(state="disabled")
 
     def inspect_file(self, filepath):
@@ -3206,14 +3421,20 @@ class EncoderApp:
     def _update_inspector_tabs(self, event=None):
         try:
             tb = getattr(self.inspector_text, "_textbox", self.inspector_text)
-            w = max(480, tb.winfo_width())
-            c1_val = 140
-            c2_lbl = max(310, int(w * 0.48))
-            c2_val = c2_lbl + 140
-            tb.configure(tabs=(c1_val, c2_lbl, c2_val))
-            return c1_val, c2_lbl, c2_val
+            w = tb.winfo_width()
+            col_gap = 135  # Exactly identical gap between data title and data for both columns
+            c1_val = 145
+            if w > 560:
+                half = max(c1_val + 175, w // 2)
+                c2_lbl = half - 15
+                c2_val = c2_lbl + col_gap
+                tb.configure(tabs=(c1_val, c2_lbl, c2_val))
+                return (c1_val, c2_lbl, c2_val)
+            else:
+                tb.configure(tabs=(c1_val,))
+                return (c1_val,)
         except Exception:
-            return 140, 310, 450
+            return (145, 345, 480)
 
     def _render_inspection(self, data, filepath):
         self.inspected_data = data
@@ -3262,109 +3483,111 @@ class EncoderApp:
         can_queue = (ext in SUPPORTED_EXTENSIONS) and (len(v_streams) > 0) and not is_image and not is_audio
         self.btn_inspect_to_queue.configure(state="normal" if can_queue else "disabled")
 
-        # Generate Quick Badge Pills
+        # Generate Punchy HUD Quick Stat Cards (Data on the Left of Title)
         self.clear_badges()
-        badges = []
-        size_badge_str = format_bytes_size_str(size_bytes).split(" (")[0] if size_bytes else ""
+        cards = []
 
         if v_streams:
             v0 = v_streams[0]
-            # 1. Resolution (First) - Main Accent
+            # 1. Resolution - Accent Highlight
             w0 = v0.get("width", 0)
             h0 = v0.get("height", 0)
             lbl0 = get_common_resolution_label(w0, h0).strip(" ()")
-            if lbl0:
-                badges.append((f"{lbl0}", ULTRA_BG, ULTRA_TEXT))
-            elif w0 and h0:
-                badges.append((f"{w0}x{h0}", ULTRA_BG, ULTRA_TEXT))
+            res_val = f"{lbl0} ({w0}x{h0})" if (lbl0 and w0 and h0) else (f"{w0}x{h0}" if (w0 and h0) else "N/A")
+            cards.append(("Resolution", res_val, ULTRA_BG, ULTRA_TEXT, ULTRA_BORDER))
 
-            # 2. Bitrate - Main Accent
+            # 2. Bitrate - Sky Blue
             v_br = fmt.get("bit_rate") or v0.get("bit_rate") or v0.get("tags", {}).get("bps") or v0.get("tags", {}).get("BPS")
-            if v_br:
-                badges.append((format_bitrate_str(v_br), ULTRA_BG, ULTRA_TEXT))
+            br_val = format_bitrate_str(v_br) if v_br else "N/A"
+            cards.append(("Bitrate", br_val, "#0c2229", "#38bdf8", "#154352"))
 
-            # 3. Framerate - Neutral Dark
+            # 3. Frame Rate - Emerald Green
             fps0 = parse_stream_fps_val(v0)
-            if fps0:
-                badges.append((f"{fps0:.2f} FPS", "#1a1a1a", "#e0e0e0"))
+            fr_mode = get_frame_rate_mode(v0)
+            mode_short = "CFR" if "CFR" in fr_mode else ("VFR" if "VFR" in fr_mode else "")
+            fps_val = (f"{fps0:.2f} FPS" + (f" ({mode_short})" if mode_short else "")) if fps0 else "N/A"
+            cards.append(("Frame Rate", fps_val, "#0b2418", "#34d399", "#144d32"))
 
-            # 4. Bit Depth & 5. Chroma Sampling - Neutral Dark
+            # 4. Color & Depth - Gold for HDR, Purple for SDR
             pix_fmt = v0.get("pix_fmt", "")
             chroma0, bit_depth0 = analyze_pix_fmt(pix_fmt, v0.get("bits_per_raw_sample"))
-            if bit_depth0 and bit_depth0 != "N/A":
-                badges.append((f"{bit_depth0}", "#1a1a1a", "#d8d8d8"))
-            if chroma0 and chroma0 != "N/A":
-                badges.append((f"{chroma0}", "#1a1a1a", "#d8d8d8"))
-
-            # 6. Color Primaries / HDR - Amber for HDR, Neutral for SDR
             cprim = v0.get("color_primaries")
-            if cprim and cprim != "N/A" and cprim != "unknown":
-                cp_disp = "BT.709" if "709" in cprim else ("BT.2020" if "2020" in cprim else cprim.upper())
-                c_trc = str(v0.get("color_transfer", "")).lower()
-                is_hdr = any(k in c_trc for k in ("smpte2084", "pq", "arib-std-b67", "hlg"))
-                if is_hdr:
-                    cp_disp += " HDR"
-                    badges.append((cp_disp, HOLD_BG, HOLD_TEXT))
-                else:
-                    badges.append((cp_disp, "#1a1a1a", "#888888"))
+            cp_disp = "BT.709" if (cprim and "709" in cprim) else ("BT.2020" if (cprim and "2020" in cprim) else (cprim.upper() if cprim and cprim not in ("N/A", "unknown") else "SDR"))
+            c_trc = str(v0.get("color_transfer", "")).lower()
+            is_hdr = any(k in c_trc for k in ("smpte2084", "pq", "arib-std-b67", "hlg"))
+            if is_hdr:
+                color_val = f"{cp_disp} HDR • {bit_depth0}"
+                cards.append(("Color / HDR", color_val, "#291a07", "#fbbf24", "#57380f"))
+            else:
+                cd_parts = [cp_disp]
+                if bit_depth0 and bit_depth0 != "N/A": cd_parts.append(bit_depth0)
+                if chroma0 and chroma0 != "N/A": cd_parts.append(chroma0)
+                color_val = " • ".join(cd_parts)
+                cards.append(("Color Space", color_val, "#1c162b", "#c084fc", "#3b2b5c"))
 
-            # 7. Audio Codec & 8. Audio Sample Rate - Neutral
+            # 5. Audio - Indigo
             if a_streams:
                 a0 = a_streams[0]
                 ac0 = a0.get("codec_name", "").upper()
-                if ac0:
-                    badges.append((f"{ac0}", "#1a1a1a", "#d8d8d8"))
                 sr0 = a0.get("sample_rate")
-                if sr0:
-                    sr_k = f"{float(sr0)/1000.0:.1f} kHz"
-                    badges.append((f"{sr_k}", "#1a1a1a", "#d8d8d8"))
+                sr_k = f"{float(sr0)/1000.0:.0f}k" if sr0 else ""
+                try: ch0 = int(a0.get("channels", 2) or 2)
+                except Exception: ch0 = 2
+                ch_str = "Mono" if ch0 == 1 else ("Stereo" if ch0 == 2 else f"{ch0}Ch")
+                a_parts = [ac0] if ac0 else []
+                if ch_str: a_parts.append(ch_str)
+                if sr_k: a_parts.append(sr_k)
+                audio_val = " • ".join(a_parts) or "Audio Stream"
+                cards.append(("Audio", audio_val, "#141a29", "#818cf8", "#233252"))
+            else:
+                cards.append(("Audio", "No Audio Track", "#18191c", "#9ca3af", "#2e3036"))
 
-            # 9. File Size - Neutral
-            if size_badge_str:
-                badges.append((size_badge_str, "#1a1a1a", "#d8d8d8"))
+            # 6. File Size - Neutral Graphite
+            dur_short = format_time_duration(duration) if duration > 0 else ""
+            sz_str = format_bytes_size_str(size_bytes).split(" (")[0] if size_bytes else "N/A"
+            size_val = f"{sz_str} ({dur_short})" if dur_short else sz_str
+            cards.append(("File Size", size_val, "#18191c", "#e2e8f0", "#2e3036"))
 
         elif is_image and (img_streams or v_streams):
             im0 = (img_streams or v_streams)[0]
             w0 = im0.get("width", 0)
             h0 = im0.get("height", 0)
             mp = round((w0 * h0) / 1_000_000.0, 1) if (w0 and h0) else 0
-            if mp > 0:
-                badges.append((f"{mp} MP ({w0}x{h0})", ULTRA_BG, ULTRA_TEXT))
-            elif w0 and h0:
-                badges.append((f"{w0}x{h0}", ULTRA_BG, ULTRA_TEXT))
+            c_name = im0.get("codec_name", "IMAGE").upper()
             pix_fmt = im0.get("pix_fmt", "")
             chroma0, bit_depth0 = analyze_pix_fmt(pix_fmt, im0.get("bits_per_raw_sample"))
-            if bit_depth0 and bit_depth0 != "N/A":
-                badges.append((f"{bit_depth0}", "#1c2820", "#d1ded5"))
-            if chroma0 and chroma0 != "N/A":
-                badges.append((f"{chroma0}", "#1c2820", "#d1ded5"))
-            if size_badge_str:
-                badges.append((size_badge_str, "#162018", "#d1ded5"))
+            dar = im0.get("display_aspect_ratio") or (f"{round(w0/h0, 2)}:1" if (w0 and h0) else "")
+            sz_str = format_bytes_size_str(size_bytes).split(" (")[0] if size_bytes else "N/A"
+
+            cards.append(("Resolution", f"{mp} MP ({w0}x{h0})" if mp > 0 else (f"{w0}x{h0}" if (w0 and h0) else "N/A"), ULTRA_BG, ULTRA_TEXT, ULTRA_BORDER))
+            cards.append(("Format", c_name, "#0c2229", "#38bdf8", "#154352"))
+            cards.append(("Color Depth", f"{bit_depth0} ({pix_fmt})" if bit_depth0 != "N/A" else pix_fmt, "#1c162b", "#c084fc", "#3b2b5c"))
+            cards.append(("Chroma", chroma0 if chroma0 != "N/A" else "Standard", "#0b2418", "#34d399", "#144d32"))
+            cards.append(("Aspect Ratio", dar or "N/A", "#141a29", "#818cf8", "#233252"))
+            cards.append(("File Size", sz_str, "#18191c", "#e2e8f0", "#2e3036"))
 
         elif a_streams:
             a0 = a_streams[0]
             ac0 = a0.get("codec_name", "").upper()
+            lossless = any(c in ac0.lower() for c in ("pcm", "flac", "alac", "truehd", "wavpack", "ape"))
             a_br = a0.get("bit_rate") or a0.get("tags", {}).get("bps") or fmt.get("bit_rate")
-            lossless = ("pcm", "flac", "alac", "truehd", "wavpack", "ape")
-            if any(c in ac0.lower() for c in lossless):
-                badges.append(("LOSSLESS", DONE_BG, DONE_GREEN))
-            elif a_br:
-                badges.append((format_bitrate_str(a_br), ULTRA_BG, ULTRA_TEXT))
-            if ac0:
-                badges.append((f"{ac0}", "#1a1a1a", "#d8d8d8"))
-            ch0 = a0.get("channels")
-            layout = a0.get("channel_layout") or (f"{ch0} Ch" if ch0 else "")
-            if layout:
-                badges.append((f"{layout}", "#1a1a1a", "#e0e0e0"))
             sr0 = a0.get("sample_rate")
-            if sr0:
-                sr_k = f"{float(sr0)/1000.0:.1f} kHz"
-                badges.append((f"{sr_k}", "#1a1a1a", "#d8d8d8"))
-            if size_badge_str:
-                badges.append((size_badge_str, "#162018", "#d1ded5"))
+            sr_k = f"{float(sr0)/1000.0:.1f} kHz" if sr0 else ""
+            try: ch0 = int(a0.get("channels", 2) or 2)
+            except Exception: ch0 = 2
+            layout = a0.get("channel_layout") or ("Mono" if ch0 == 1 else ("Stereo" if ch0 == 2 else f"{ch0} Ch"))
+            dur_short = format_time_duration(duration) if duration > 0 else ""
+            sz_str = format_bytes_size_str(size_bytes).split(" (")[0] if size_bytes else "N/A"
 
-        for b_text, b_bg, b_fg in badges:
-            self.add_badge(b_text, b_bg, b_fg, reflow=False)
+            cards.append(("Audio Format", f"{ac0} {'(Lossless)' if lossless else ''}".strip(), ULTRA_BG, ULTRA_TEXT, ULTRA_BORDER))
+            cards.append(("Bitrate", "Lossless" if lossless else (format_bitrate_str(a_br) if a_br else "N/A"), "#0c2229", "#38bdf8", "#154352"))
+            cards.append(("Sample Rate", sr_k or "N/A", "#0b2418", "#34d399", "#144d32"))
+            cards.append(("Channels", str(layout), "#1c162b", "#c084fc", "#3b2b5c"))
+            cards.append(("Duration", dur_short or "N/A", "#141a29", "#818cf8", "#233252"))
+            cards.append(("File Size", sz_str, "#18191c", "#e2e8f0", "#2e3036"))
+
+        for c_title, c_val, c_bg, c_fg, c_border in cards:
+            self.add_stat_card(c_title, c_val, c_bg, c_fg, c_border, reflow=False)
         self._reflow_badges(force=True)
 
         if hasattr(self, "_reflow_job") and self._reflow_job:
@@ -3463,9 +3686,7 @@ class EncoderApp:
                     ("Aspect Ratio", dar if dar else None),
                     ("Bit Depth", f"{bit_depth} ({pix_fmt})"),
                     ("Chroma Sampling", chroma),
-                    ("Color Primaries", c_prim if c_prim != "unspecified" else None),
                     ("Matrix / Space", c_space if c_space != "unspecified" else None),
-                    ("Color Range", c_range.upper() if c_range != "unspecified" else None),
                 ]
 
                 for sd in s.get("side_data_list", []):
@@ -3522,42 +3743,43 @@ class EncoderApp:
         tb.configure(state="normal")
         tb.delete("1.0", "end")
 
-        c1_val, c2_lbl, _ = self._update_inspector_tabs()
+        self._update_inspector_tabs()
 
-
-        avail_v1 = max(40, (c2_lbl - c1_val) - 20)
-
-
-        max_v1_chars = max(8, int(avail_v1 / 8.2))
-
-        tb.tag_configure("sec_h", font=("SF Pro Display", 11, "bold"), foreground=ULTRA_TEXT)
-        tb.tag_configure("lbl", font=("SF Pro Text", 11), foreground=TEXT_MUTED)
-        tb.tag_configure("val", font=("SF Pro Text", 11, "bold"), foreground=TEXT_PRIMARY)
+        tb.tag_configure("sec_h", font=("SF Pro Display", 12, "bold"), foreground=ULTRA_TEXT, spacing1=12, spacing3=5)
+        tb.tag_configure("lbl", font=("SF Pro Text", 11), foreground=TEXT_MUTED, spacing1=3, spacing3=3)
+        tb.tag_configure("val", font=("SF Pro Text", 11, "bold"), foreground=TEXT_PRIMARY, spacing1=3, spacing3=3)
 
         for sec_idx, (sec_title, items) in enumerate(sections):
             if not items:
                 continue
             if sec_idx > 0:
                 tb.insert("end", "\n")
-            tb.insert("end", f"  {sec_title}\n\n", "sec_h")
+            tb.insert("end", f"  ●  {sec_title}\n\n", "sec_h")
 
-            for i in range(0, len(items), 2):
+            i = 0
+            while i < len(items):
                 lbl1, val1 = items[i]
-                if i + 1 < len(items):
-                    lbl2, val2 = items[i + 1]
-                    val1_str = str(val1)
-                    disp_val1 = f"{val1_str[:max_v1_chars - 3]}..." if len(val1_str) > max_v1_chars else val1_str
-                    tb.insert("end", f"  {lbl1}\t", "lbl")
-                    tb.insert("end", f"{disp_val1}\t", "val")
-                    tb.insert("end", f"{lbl2}\t", "lbl")
-                    tb.insert("end", f"{val2}\n", "val")
-                else:
+                is_wide1 = len(str(val1)) > 30 or len(str(lbl1)) > 17
+                if is_wide1 or i + 1 >= len(items):
                     tb.insert("end", f"  {lbl1}\t", "lbl")
                     tb.insert("end", f"{val1}\n", "val")
+                    i += 1
+                else:
+                    lbl2, val2 = items[i + 1]
+                    is_wide2 = len(str(val2)) > 30 or len(str(lbl2)) > 17
+                    if is_wide2:
+                        tb.insert("end", f"  {lbl1}\t", "lbl")
+                        tb.insert("end", f"{val1}\n", "val")
+                        i += 1
+                    else:
+                        tb.insert("end", f"  {lbl1}\t", "lbl")
+                        tb.insert("end", f"{val1}\t", "val")
+                        tb.insert("end", f"{lbl2}\t", "lbl")
+                        tb.insert("end", f"{val2}\n", "val")
+                        i += 2
 
         tb.configure(state="disabled")
         self.inspector_scroller.sync_position()
-
 
     def _render_inspection_error(self, err):
         self.clear_badges()
@@ -3609,7 +3831,7 @@ class EncoderApp:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(content)
                 self.btn_inspect_copy.configure(text="✔ Copied!")
-                self.root.after(1400, lambda: self.btn_inspect_copy.configure(text="📋 Copy Summary"))
+                self.root.after(1400, lambda: self.btn_inspect_copy.configure(text="Copy Summary"))
         except Exception: pass
 
     def inspect_queued_item(self, item_id):
