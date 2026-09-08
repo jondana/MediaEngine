@@ -557,10 +557,18 @@ def get_default_presets():
         "Non-Log Footage": {
             "codec": "HEVC (H.265)",
             "encoder": "AppleMediaEngine",
-            "chroma": chroma,
+            "chroma": "10-Bit 4:2:0",
             "quality": "58",
             "quality_encoder": "AppleMediaEngine",
-            "denoise": "15"
+            "denoise": "12"
+        },
+        "Screen Recordings": {
+            "codec": "HEVC (H.265)",
+            "encoder": "AppleMediaEngine",
+            "chroma": "10-Bit 4:2:0",
+            "quality": "52",
+            "quality_encoder": "AppleMediaEngine",
+            "denoise": "0"
         },
         "Custom": {
             "codec": "HEVC (H.265)",
@@ -2228,6 +2236,11 @@ class EncoderApp:
         self.last_vt_quality = 69
         self.last_cpu_crf = 33
         self._dispatcher_crash_count = 0
+        self.batch_cur_pct = 0.0
+        self.batch_target_pct = 0.0
+        self.batch_velocity = 0.0
+        self.batch_anim_job = None
+        self._last_batch_tween_time = 0.0
 
         # Media Inspector Cache
         self.inspected_data = None
@@ -2244,6 +2257,8 @@ class EncoderApp:
         self.root.bind_all("<BackSpace>", self._on_delete_key, add="+")
         self.root.bind_all("<Delete>", self._on_delete_key, add="+")
         self.root.bind_all("<KP_Delete>", self._on_delete_key, add="+")
+        self.root.bind_all("<Command-a>", self._on_select_all_key, add="+")
+        self.root.bind_all("<Control-a>", self._on_select_all_key, add="+")
 
         self._option_key_pressed = False
         self.root.bind_all("<KeyPress>", self._on_key_press_option, add="+")
@@ -3181,6 +3196,15 @@ class EncoderApp:
             seg_btn.configure(font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), height=30, corner_radius=8)
 
         # Tab 1: Queue
+        self.queue_top_bar = ctk.CTkFrame(self.tabview, fg_color="transparent")
+        self.btn_select_all = ctk.CTkButton(
+            self.queue_top_bar, text="Select All", width=86, height=26, corner_radius=6,
+            fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER,
+            font=ctk.CTkFont(family="SF Pro Text", size=11, weight="bold"),
+            command=self.select_all_queue_items
+        )
+        self.btn_select_all.pack(side="right")
+
         queue_wrap = ctk.CTkFrame(self.tab_queue, fg_color="transparent")
         queue_wrap.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -3230,6 +3254,7 @@ class EncoderApp:
             inspector_view=self.inspector_text
         )
         self.update_action_button_ui()
+        self._on_tab_changed()
 
     def open_user_manual(self):
         if hasattr(self, "_manual_window") and self._manual_window and self._manual_window.winfo_exists():
@@ -3363,7 +3388,7 @@ class EncoderApp:
              [
                  ("Log Footage Preset", "HEVC • 10-Bit 4:2:2 • Quality: 69 • Denoise: 10"),
                  ("Why Q69 for Log?", "Preserves shadow latitude, fine grain structure, and subtle gradations without banding."),
-                 ("Non-Log Preset", "HEVC • 10-Bit 4:2:0 • Quality: 58 • Denoise: 15"),
+                 ("Non-Log Preset", "HEVC • 10-Bit 4:2:0 • Quality: 58 • Denoise: 12"),
                  ("Why Q58 for Rec.709?", "Optimal sweet spot for delivery, web, and archives with high compression and zero visible loss."),
                  ("Software (CPU) Mode", "libx265 / libx264 with tuned psycho-visual RD, SAO disabled, and AQ mode 3 for deep control.")
              ]),
@@ -4172,6 +4197,12 @@ class EncoderApp:
 
     def _on_tab_changed(self, *args):
         try:
+            if hasattr(self, "queue_top_bar"):
+                if self.tabview.get() == "Batch Queue":
+                    self.queue_top_bar.place(relx=1.0, x=-6, y=4, anchor="ne")
+                    self.queue_top_bar.lift()
+                else:
+                    self.queue_top_bar.place_forget()
             if hasattr(self, "inspector_top_bar"):
                 if self.tabview.get() == "Media Inspector":
                     self.inspector_top_bar.place(relx=1.0, x=-6, y=4, anchor="ne")
@@ -4842,6 +4873,51 @@ class EncoderApp:
         self._update_queue_stats()
         if removed_count > 0: self.append_log(f"[INFO] Cleared {removed_count} queued item(s).\n")
 
+    def _start_batch_tween(self):
+        if getattr(self, "batch_anim_job", None) is None:
+            self._last_batch_tween_time = time.perf_counter()
+            self._batch_tween_step()
+
+    def _batch_tween_step(self):
+        self.batch_anim_job = None
+        now = time.perf_counter()
+        dt = min(0.05, max(0.001, now - getattr(self, "_last_batch_tween_time", now)))
+        self._last_batch_tween_time = now
+
+        target = getattr(self, "batch_target_pct", 0.0)
+        cur = getattr(self, "batch_cur_pct", 0.0)
+        vel = getattr(self, "batch_velocity", 0.0)
+
+        still_animating = False
+        if abs(target - cur) > 0.04 or abs(vel) > 0.1:
+            omega = 2.0 / 0.22
+            x = omega * dt
+            exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x)
+            change = cur - target
+            temp = (vel + omega * change) * dt
+            new_vel = (vel - omega * temp) * exp
+            new_cur = target + (change + temp) * exp
+
+            if abs(target - new_cur) < 0.05 and abs(new_vel) < 0.2:
+                new_cur = target
+                new_vel = 0.0
+            else:
+                still_animating = True
+
+            self.batch_cur_pct = new_cur
+            self.batch_velocity = new_vel
+        elif cur != target:
+            self.batch_cur_pct = target
+            self.batch_velocity = 0.0
+
+        if hasattr(self, "batch_progress_bar"):
+            self.batch_progress_bar.set(max(0.0, min(1.0, self.batch_cur_pct / 100.0)))
+        if hasattr(self, "lbl_batch_pct"):
+            self.lbl_batch_pct.configure(text=f"{int(round(self.batch_cur_pct))}%")
+
+        if still_animating:
+            self.batch_anim_job = self.root.after(12, self._batch_tween_step)
+
     def _update_queue_stats(self):
         with self.queue_lock:
             total = len(self.queue_items)
@@ -4860,12 +4936,26 @@ class EncoderApp:
 
         if total == 0:
             self.lbl_batch_status.configure(text="Queue is empty")
+            self.batch_target_pct = 0.0
+            self.batch_cur_pct = 0.0
+            self.batch_velocity = 0.0
+            if getattr(self, "batch_anim_job", None) is not None:
+                try: self.root.after_cancel(self.batch_anim_job)
+                except Exception: pass
+                self.batch_anim_job = None
             self.lbl_batch_pct.configure(text="0%")
             self.batch_progress_bar.set(0)
         else:
-            pct = min(1.0, max(0.0, total_progress / total)) if total > 0 else 0.0
-            self.batch_progress_bar.set(pct)
-            self.lbl_batch_pct.configure(text=f"{int(pct * 100)}%")
+            target_p = min(100.0, max(0.0, (total_progress / total) * 100.0)) if total > 0 else 0.0
+            self.batch_target_pct = target_p
+            if target_p < getattr(self, "batch_cur_pct", 0.0) - 4.0:
+                self.batch_cur_pct = target_p
+                self.batch_velocity = 0.0
+                if hasattr(self, "batch_progress_bar"):
+                    self.batch_progress_bar.set(target_p / 100.0)
+                if hasattr(self, "lbl_batch_pct"):
+                    self.lbl_batch_pct.configure(text=f"{int(round(target_p))}%")
+            self._start_batch_tween()
             txt = f"Batch: {completed}/{total} Completed"
             parts = []
             if running > 0: parts.append(f"{running} Active")
@@ -4873,6 +4963,7 @@ class EncoderApp:
             if queued > 0: parts.append(f"{queued} Queued")
             if parts: txt += " • " + " • ".join(parts)
             self.lbl_batch_status.configure(text=txt)
+            self._update_select_all_btn()
 
     def add_files_dialog(self):
         ext_patterns = " ".join(f"*{ext}" for ext in SUPPORTED_EXTENSIONS)
@@ -4994,6 +5085,7 @@ class EncoderApp:
 
         self.canvas_queue.set_selected_ids(self.selected_queue_ids)
         self.load_selected_item_settings()
+        self._update_select_all_btn()
 
     def load_selected_item_settings(self):
         if not self.selected_queue_ids:
@@ -5060,6 +5152,44 @@ class EncoderApp:
             self.canvas_queue.set_selected_ids(self.selected_queue_ids)
             self.update_settings_header_label()
             self.update_settings_summary()
+            self._update_select_all_btn()
+
+    def select_all_queue_items(self):
+        with self.queue_lock:
+            queued_ids = {q["id"] for q in self.queue_items if q.get("status") == "queued"}
+        if not queued_ids:
+            return
+        if self.selected_queue_ids == queued_ids:
+            self.clear_selection()
+        else:
+            self.selected_queue_ids = set(queued_ids)
+            self._selection_pivot_id = next(iter(self.selected_queue_ids))
+            self.canvas_queue.set_selected_ids(self.selected_queue_ids)
+            self.load_selected_item_settings()
+        self._update_select_all_btn()
+
+    def _update_select_all_btn(self):
+        if not hasattr(self, "btn_select_all"):
+            return
+        with self.queue_lock:
+            queued_ids = {q["id"] for q in self.queue_items if q.get("status") == "queued"}
+        if queued_ids and self.selected_queue_ids == queued_ids:
+            self.btn_select_all.configure(text="Deselect All")
+        else:
+            self.btn_select_all.configure(text="Select All")
+
+    def _on_select_all_key(self, event=None):
+        try:
+            focused = self.root.focus_get()
+            if focused:
+                w_class = focused.winfo_class()
+                if w_class in ("Entry", "Text", "TEntry", "TCombobox"):
+                    return
+        except Exception:
+            pass
+        if hasattr(self, "tabview") and self.tabview.get() == "Batch Queue":
+            self.select_all_queue_items()
+            return "break" 
 
     def _on_delete_key(self, event=None):
         try:
