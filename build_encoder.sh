@@ -1166,7 +1166,11 @@ class QuartzActiveJobsCanvas(tk.Canvas):
 
             if state == "holding":
                 still_animating = True
-                if (now - job.get("hold_start", now)) >= job.get("hold_duration", 0.85):
+                if job.get("cur_pct", 0.0) < 99.95:
+                    job["hold_start"] = now
+                    if "metrics_fade_start" in job:
+                        job["metrics_fade_start"] = now
+                elif (now - job.get("hold_start", now)) >= job.get("hold_duration", 0.85):
                     job["state"] = "fading"
                     job["fade_start"] = now
                     needs_full_redraw = True
@@ -1214,6 +1218,13 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                     job["velocity"] = 0.0
                     if not needs_full_redraw:
                         self._update_job_pbar(iid, target)
+
+                if job.get("is_complete") and job.get("cur_pct", 0.0) >= 99.95 and not job.get("is_done_ui"):
+                    job["is_done_ui"] = True
+                    job["hold_start"] = now
+                    job["metrics_fade_start"] = now
+                    if not needs_full_redraw:
+                        self._update_job_pbar(iid, 100.0)
 
             if job.get("is_done_ui") and "metrics_fade_start" in job:
                 try:
@@ -1271,7 +1282,7 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                 pass
             return
         try:
-            is_done = job.get("is_complete", False) or job.get("is_done_ui", False) or (pct >= 99.95)
+            is_done = (job.get("is_complete", False) or job.get("is_done_ui", False)) and (pct >= 99.95)
             alpha = job.get("alpha", 1.0)
             p_col = blend_hex(DONE_BG, CARD_BG, alpha) if is_done else blend_hex(self._get_progress_color(), CARD_BG, alpha)
             if not self.find_withtag(tag):
@@ -1288,6 +1299,11 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             else:
                 self.coords(tag, *pts)
                 self.itemconfigure(tag, fill=p_col, outline=p_col, width=stroke_w, joinstyle=tk.ROUND, state="normal")
+
+            if not is_done:
+                self.itemconfig(f"pct_{item_id}", text=f"{min(99.9, pct):.1f}%", fill=blend_hex(ULTRA_TEXT, CARD_BG, alpha))
+            else:
+                self.itemconfig(f"pct_{item_id}", text="100%", fill=blend_hex(DONE_GREEN, CARD_BG, alpha))
         except tk.TclError:
             pass
 
@@ -1317,18 +1333,11 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             job["cur_pct"] = target_p
             job["velocity"] = 0.0
             self._update_job_pbar(item_id, target_p)
-        if target_p >= 99.95:
-            target_p = 100.0
-            job["target_pct"] = 100.0
-            job["is_done_ui"] = True
-            if "metrics_fade_start" not in job:
-                job["metrics_fade_start"] = time.perf_counter()
-                job["old_metrics"] = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
-                job["done_metrics"] = f"{clean_t}  •  Completed" if clean_t else "Completed"
-            self.itemconfig(f"pct_{item_id}", text="100%", fill=DONE_GREEN)
-            self._update_job_pbar(item_id, 100.0)
-        else:
-            self.itemconfig(f"pct_{item_id}", text=f"{pct:.1f}%", fill=ULTRA_TEXT)
+        if "old_metrics" not in job:
+            job["old_metrics"] = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
+        if "done_metrics" not in job:
+            job["done_metrics"] = f"{clean_t}  •  Completed" if clean_t else "Completed"
+        if not job.get("is_done_ui"):
             metrics_txt = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
             self.itemconfig(f"metrics_{item_id}", text=metrics_txt)
         self._start_tween()
@@ -1347,27 +1356,30 @@ class QuartzActiveJobsCanvas(tk.Canvas):
         now = time.perf_counter()
         if completed:
             job["is_complete"] = True
-            job["is_done_ui"] = True
             job["target_pct"] = 100.0
-            job["cur_pct"] = 100.0
-            if "metrics_fade_start" not in job:
-                job["metrics_fade_start"] = now
-                clean_t = job.get("t_str", "")
-                clean_s = job.get("s_str", "")
-                clean_f = job.get("f_str", "")
-                clean_eta = job.get("eta_str", "")
+            clean_t = job.get("t_str", "")
+            clean_s = job.get("s_str", "")
+            clean_f = job.get("f_str", "")
+            clean_eta = job.get("eta_str", "")
+            if "old_metrics" not in job:
                 job["old_metrics"] = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {clean_eta}" if (clean_s or clean_f) else (f"{clean_t}  •  Completed" if clean_t else "Completed")
+            if "done_metrics" not in job:
                 job["done_metrics"] = f"{clean_t}  •  Completed" if clean_t else "Completed"
             job["state"] = "holding"
-            job["hold_start"] = now
             job["hold_duration"] = 0.85
             job["exit_duration"] = 0.38
+            if job.get("cur_pct", 0.0) >= 99.95:
+                job["is_done_ui"] = True
+                job["hold_start"] = now
+                job["metrics_fade_start"] = now
+                self.redraw_all()
+            else:
+                job["hold_start"] = now
         else:
             job["state"] = "fading"
             job["fade_start"] = now
             job["exit_duration"] = 0.18
-
-        self.redraw_all()
+            self.redraw_all()
         self._start_tween()
 
     def job_count(self):
@@ -1468,7 +1480,7 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             sh3_col = blend_hex("#050507", bg_target, alpha)
             card_bg = blend_hex("#161616", bg_target, alpha)
 
-            is_comp = job.get("is_complete", False) or job.get("is_done_ui", False) or (cur_pct >= 99.95) or (target_pct >= 99.95)
+            is_comp = (job.get("is_complete", False) or job.get("is_done_ui", False)) and (cur_pct >= 99.95)
             if is_comp:
                 p_col = blend_hex(DONE_BG, bg_target, alpha)
             else:
@@ -1502,14 +1514,14 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             if alpha > 0.12 and card_h > 12:
                 tag_str = f"[{job['tag']}] " if job.get("tag") else ""
                 raw_title = f"{tag_str}{job['title']}"
-                disp_pct = job.get("target_pct", cur_pct)
+                disp_pct = cur_pct if not is_comp else 100.0
                 cy = (y1 + y2) / 2
 
                 pct_col_raw = DONE_GREEN if is_comp else ULTRA_TEXT
                 pct_col = blend_hex(pct_col_raw, bg_target, alpha)
                 pct_x = x2 - 12
                 metrics_x = pct_x - 52
-                disp_pct_str = "100%" if (is_comp or disp_pct >= 99.95) else f"{disp_pct:.1f}%"
+                disp_pct_str = "100%" if is_comp else f"{disp_pct:.1f}%"
                 self.create_text(pct_x, cy, text=disp_pct_str, fill=pct_col, anchor="e", font=("SF Pro Text", 10, "bold"), tags=("pct", f"pct_{iid}"))
 
                 if is_comp:
@@ -4150,15 +4162,9 @@ class EncoderApp:
         target_height = getattr(self, "active_jobs_height", int(3.5 * QuartzActiveJobsCanvas.ROW_STEP) + 4)
         if not self.active_jobs_wrap.winfo_ismapped():
             self.active_jobs_wrap.pack(fill="x", padx=10, pady=(0, 10))
-        total_content_h = count * QuartzActiveJobsCanvas.ROW_STEP + 4
-        if total_content_h > target_height:
-            if not self.active_jobs_scrollbar.winfo_ismapped():
-                self.active_jobs_scrollbar.pack(side="right", fill="y", pady=0, before=self.active_jobs_canvas)
-        else:
-            if self.active_jobs_scrollbar.winfo_ismapped():
-                self.active_jobs_scrollbar.pack_forget()
+        if self.active_jobs_scrollbar.winfo_ismapped():
+            self.active_jobs_scrollbar.pack_forget()
         self.active_jobs_canvas.configure(height=target_height)
-        self.active_jobs_scrollbar.configure(height=target_height)
         self.active_jobs_canvas.redraw_all()
 
     def _process_ui_queue(self):
