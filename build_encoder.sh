@@ -113,6 +113,11 @@ import tkinter as tk
 from tkinter import messagebox, filedialog, colorchooser
 import customtkinter as ctk
 import webbrowser
+try:
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 try:
     import ctypes
@@ -1557,10 +1562,31 @@ class QuartzActiveJobsCanvas(tk.Canvas):
         self.redraw_all()
 
 
+def make_vertical_gradient_image(width, height, rgb, fade_to_bottom=True):
+    if not HAS_PIL:
+        return None
+    try:
+        r, g, b = rgb
+        w = max(1, int(width))
+        h = max(1, int(height))
+        row_bytes = bytearray()
+        for y in range(h):
+            t = y / max(1.0, float(h - 1))
+            factor = (1.0 - t) if fade_to_bottom else t
+            alpha = int(255 * (factor ** 1.6))
+            alpha = max(0, min(255, alpha))
+            row_bytes.extend(bytes([r, g, b, alpha]) * w)
+        img = Image.frombytes("RGBA", (w, h), bytes(row_bytes))
+        return ImageTk.PhotoImage(img)
+    except Exception:
+        return None
+
+
 class QuartzQueueCanvas(tk.Canvas):
     ROW_H = 36
     ROW_GAP = 4
     ROW_STEP = 40
+    GRAD_H = 36
 
     def __init__(self, master, on_remove_item=None, on_inspect_item=None, on_select_item=None, **kwargs):
         super().__init__(master, bg=CARD_BG, bd=0, highlightthickness=0, relief="flat", **kwargs)
@@ -1574,6 +1600,10 @@ class QuartzQueueCanvas(tk.Canvas):
         self.is_option_mode = False
         self._external_yscrollcommand = None
         self._updating_viewport = False
+        self._grad_top_photo = None
+        self._grad_bot_photo = None
+        self._last_grad_w = None
+        self._last_grad_bg = None
 
         self.scroller = QuartzKineticScroller(
             get_view_metrics=self._get_scroll_metrics,
@@ -1587,6 +1617,71 @@ class QuartzQueueCanvas(tk.Canvas):
         self.bind("<Motion>", self._on_mouse_move)
         self.bind("<Leave>", self._on_mouse_leave)
         self.bind("<Button-1>", self._on_click)
+
+    def _get_bg_rgb(self):
+        try:
+            col = self.cget("bg") or CARD_BG
+            col = str(col).lstrip("#")
+            if len(col) == 6:
+                return (int(col[0:2], 16), int(col[2:4], 16), int(col[4:6], 16))
+        except Exception:
+            pass
+        return (18, 18, 18)
+
+    def _clear_gradients(self):
+        self.delete("gradient_top")
+        self.delete("gradient_bottom")
+
+    def _ensure_gradient_photos(self, w):
+        bg_rgb = self._get_bg_rgb()
+        if (getattr(self, "_last_grad_w", None) != w or
+            getattr(self, "_last_grad_bg", None) != bg_rgb or
+            self._grad_top_photo is None or
+            self._grad_bot_photo is None):
+            self._last_grad_w = w
+            self._last_grad_bg = bg_rgb
+            self._grad_top_photo = make_vertical_gradient_image(w, self.GRAD_H, bg_rgb, fade_to_bottom=True)
+            self._grad_bot_photo = make_vertical_gradient_image(w, self.GRAD_H, bg_rgb, fade_to_bottom=False)
+
+    def _update_gradients(self, w, total_h):
+        view_h = float(self.winfo_height())
+        if view_h <= 1:
+            try:
+                view_h = float(self.cget("height"))
+            except Exception:
+                view_h = 400.0
+
+        if not self.items or total_h <= view_h:
+            self._clear_gradients()
+            return
+
+        y_top = self.canvasy(0)
+        y_bot = self.canvasy(view_h)
+
+        self._ensure_gradient_photos(w)
+
+        need_top = (y_top > 1.0)
+        if need_top and getattr(self, "_grad_top_photo", None):
+            if not self.find_withtag("gradient_top"):
+                self.create_image(0, y_top, anchor="nw", image=self._grad_top_photo, tags="gradient_top")
+            else:
+                self.coords("gradient_top", 0, y_top)
+                self.itemconfigure("gradient_top", image=self._grad_top_photo, state="normal")
+            self.tag_raise("gradient_top")
+        else:
+            self.delete("gradient_top")
+
+        need_bot = (total_h > y_bot + 1.0)
+        if need_bot and getattr(self, "_grad_bot_photo", None):
+            bot_y = y_bot - self.GRAD_H
+            if not self.find_withtag("gradient_bottom"):
+                self.create_image(0, bot_y, anchor="nw", image=self._grad_bot_photo, tags="gradient_bottom")
+            else:
+                self.coords("gradient_bottom", 0, bot_y)
+                self.itemconfigure("gradient_bottom", image=self._grad_bot_photo, state="normal")
+            self.tag_raise("gradient_bottom")
+        else:
+            self.delete("gradient_bottom")
 
     def configure(self, cnf=None, **kwargs):
         if "yscrollcommand" in kwargs:
@@ -1663,6 +1758,10 @@ class QuartzQueueCanvas(tk.Canvas):
             w = max(200, self.winfo_width())
             self._draw_row(idx, self.items[idx], w)
             self.rendered_rows[idx] = item_id
+            if self.find_withtag("gradient_top"):
+                self.tag_raise("gradient_top")
+            if self.find_withtag("gradient_bottom"):
+                self.tag_raise("gradient_bottom")
 
     def update_item_status(self, item_id, status, ptext=None, done_stats=None):
         item = self.item_map.get(item_id)
@@ -1705,6 +1804,7 @@ class QuartzQueueCanvas(tk.Canvas):
             if total_items == 0:
                 self.delete("all")
                 self.rendered_rows.clear()
+                self._clear_gradients()
                 h = max(100, self.winfo_height())
                 placeholder_text = "Drop a file to inspect metadata" if getattr(self, "is_option_mode", False) else "Drop files or folders anywhere to start encode"
                 self.create_text(w / 2, h / 2, text=placeholder_text, fill=TEXT_MUTED, font=("SF Pro Text", 11), tags="placeholder")
@@ -1716,6 +1816,7 @@ class QuartzQueueCanvas(tk.Canvas):
 
             start_idx, end_idx = self._get_visible_range()
             if start_idx < 0:
+                self._clear_gradients()
                 return
 
             needed_indices = set(range(start_idx, end_idx + 1))
@@ -1740,6 +1841,8 @@ class QuartzQueueCanvas(tk.Canvas):
                     item = self.items[idx]
                     self._draw_row(idx, item, w)
                     self.rendered_rows[idx] = item["id"]
+
+            self._update_gradients(w, total_h)
 
             if not self.scroller.is_animating:
                 self.scroller.sync_position()
@@ -2404,7 +2507,7 @@ class EncoderApp:
         if hasattr(self, "inspector_text"):
             tb = getattr(self.inspector_text, "_textbox", self.inspector_text)
             try:
-                tb.tag_configure("sec_h", foreground=ULTRA_TEXT)
+                tb.tag_configure("sec_h", foreground=TEXT_PRIMARY)
             except Exception:
                 pass
         if hasattr(self, "_manual_window") and self._manual_window and self._manual_window.winfo_exists():
@@ -2412,7 +2515,7 @@ class EncoderApp:
                 if isinstance(child, ctk.CTkTextbox):
                     mtb = getattr(child, "_textbox", child)
                     try:
-                        mtb.tag_configure("sec_h", foreground=ULTRA_TEXT)
+                        mtb.tag_configure("sec_h", foreground=TEXT_PRIMARY)
                         mtb.tag_configure("bullet", foreground=ULTRA_TEXT)
                     except Exception:
                         pass
@@ -3062,13 +3165,20 @@ class EncoderApp:
         )
         seg_btn = getattr(self.tabview, "_segmented_button", None)
         if seg_btn:
-            seg_btn.configure(font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), height=40, corner_radius=8)
+            seg_btn.configure(font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), height=30, corner_radius=8)
         self.tabview.pack(fill="both", expand=True)
 
         self.tab_queue = self.tabview.add("Batch Queue")
         self.tab_inspector = self.tabview.add("Media Inspector")
         self.tab_logs = self.tabview.add("Live Console")
+        _orig_tab_set = self.tabview.set
+        def _tab_set_wrapper(name):
+            _orig_tab_set(name)
+            self._on_tab_changed()
+        self.tabview.set = _tab_set_wrapper
         self.tabview.set("Batch Queue")
+        if seg_btn:
+            seg_btn.configure(font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), height=30, corner_radius=8)
 
         # Tab 1: Queue
         queue_wrap = ctk.CTkFrame(self.tab_queue, fg_color="transparent")
@@ -3328,36 +3438,27 @@ class EncoderApp:
     # MEDIA INSPECTOR UI & PARSER
     # ----------------------------------------------------
     def setup_inspector_tab(self):
-        top_bar = ctk.CTkFrame(self.tab_inspector, fg_color="transparent")
-        top_bar.pack(fill="x", padx=6, pady=(4, 6))
-
-        self.btn_inspect_browse = ctk.CTkButton(
-            top_bar, text="Choose File...", width=120, height=30, corner_radius=8,
-            fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER,
-            font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"),
-            command=self.browse_inspect_file
-        )
-        self.btn_inspect_browse.pack(side="left", padx=(0, 6))
+        self.inspector_top_bar = ctk.CTkFrame(self.tabview, fg_color="transparent")
 
         self.btn_inspect_to_queue = ctk.CTkButton(
-            top_bar, text="➕ Add to Queue", width=135, height=30, corner_radius=8,
+            self.inspector_top_bar, text="➕ Add to Queue", width=110, height=26, corner_radius=6,
             fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER,
-            font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"),
+            font=ctk.CTkFont(family="SF Pro Text", size=11, weight="bold"),
             command=self.send_inspected_to_queue,
             state="disabled"
         )
-        self.btn_inspect_to_queue.pack(side="left")
+        self.btn_inspect_to_queue.pack(side="right")
 
-        self.btn_inspect_copy = ctk.CTkButton(
-            top_bar, text="Copy Summary", width=130, height=30, corner_radius=8,
+        self.btn_inspect_browse = ctk.CTkButton(
+            self.inspector_top_bar, text="Choose File...", width=96, height=26, corner_radius=6,
             fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER,
-            font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"),
-            command=self.copy_inspector_summary
+            font=ctk.CTkFont(family="SF Pro Text", size=11, weight="bold"),
+            command=self.browse_inspect_file
         )
-        self.btn_inspect_copy.pack(side="right")
+        self.btn_inspect_browse.pack(side="right", padx=(0, 6))
         # Quick Specs Badges Bar
         self.badges_bar = ctk.CTkFrame(self.tab_inspector, fg_color="transparent")
-        self.badges_bar.pack(fill="x", padx=6, pady=(0, 6))
+        self.badges_bar.pack(fill="x", padx=6, pady=(4, 6))
         self.badges_bar.pack_propagate(False)
         self.badges_bar.bind("<Configure>", lambda e: self._reflow_badges())
         self._badge_widgets = []
@@ -3650,7 +3751,7 @@ class EncoderApp:
         try:
             tb = getattr(self.inspector_text, "_textbox", self.inspector_text)
             w = tb.winfo_width()
-            col_gap = 135  # Exactly identical gap between data title and data for both columns
+            col_gap = 100
             c1_val = 145
             if w > 560:
                 half = max(c1_val + 175, w // 2)
@@ -3662,7 +3763,7 @@ class EncoderApp:
                 tb.configure(tabs=(c1_val,))
                 return (c1_val,)
         except Exception:
-            return (145, 345, 480)
+            return (145, 345, 445)
 
     def _render_inspection(self, data, filepath):
         self.inspected_data = data
@@ -3973,16 +4074,16 @@ class EncoderApp:
 
         self._update_inspector_tabs()
 
-        tb.tag_configure("sec_h", font=("SF Pro Display", 12, "bold"), foreground=ULTRA_TEXT, spacing1=12, spacing3=5)
-        tb.tag_configure("lbl", font=("SF Pro Text", 11), foreground=TEXT_MUTED, spacing1=3, spacing3=3)
-        tb.tag_configure("val", font=("SF Pro Text", 11, "bold"), foreground=TEXT_PRIMARY, spacing1=3, spacing3=3)
+        tb.tag_configure("sec_h", font=("SF Pro Display", 12, "bold"), foreground=TEXT_PRIMARY, spacing1=8, spacing3=2)
+        tb.tag_configure("lbl", font=("SF Pro Text", 11), foreground=TEXT_MUTED, spacing1=2, spacing3=2)
+        tb.tag_configure("val", font=("SF Pro Text", 11, "bold"), foreground=TEXT_PRIMARY, spacing1=2, spacing3=2)
 
         for sec_idx, (sec_title, items) in enumerate(sections):
             if not items:
                 continue
             if sec_idx > 0:
                 tb.insert("end", "\n")
-            tb.insert("end", f"  ●  {sec_title}\n\n", "sec_h")
+            tb.insert("end", f"  {sec_title}\n", "sec_h")
 
             i = 0
             while i < len(items):
@@ -4052,16 +4153,6 @@ class EncoderApp:
             self.handle_incoming_files([self.inspected_path])
             self.tabview.set("Batch Queue")
 
-    def copy_inspector_summary(self):
-        try:
-            content = self.inspector_text.get("1.0", "end").strip()
-            if content:
-                self.root.clipboard_clear()
-                self.root.clipboard_append(content)
-                self.btn_inspect_copy.configure(text="✔ Copied!")
-                self.root.after(1400, lambda: self.btn_inspect_copy.configure(text="Copy Summary"))
-        except Exception: pass
-
     def inspect_queued_item(self, item_id):
         with self.queue_lock:
             item = self.items_by_id.get(item_id)
@@ -4081,6 +4172,12 @@ class EncoderApp:
 
     def _on_tab_changed(self, *args):
         try:
+            if hasattr(self, "inspector_top_bar"):
+                if self.tabview.get() == "Media Inspector":
+                    self.inspector_top_bar.place(relx=1.0, x=-6, y=4, anchor="ne")
+                    self.inspector_top_bar.lift()
+                else:
+                    self.inspector_top_bar.place_forget()
             if self.tabview.get() == "Live Console":
                 self.log_text.see("end")
             elif self.tabview.get() == "Media Inspector":
@@ -6145,6 +6242,7 @@ echo "🔨 Running PyInstaller..."
     --collect-all customtkinter \
     --collect-all tkinterdnd2 \
     --collect-all tkinter \
+    --collect-all PIL \
     --osx-bundle-identifier "com.local.mediaengine" \
     --name "MediaEngine" \
     video_encoder_gui.py
