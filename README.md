@@ -2,6 +2,8 @@
 
 # MediaEngine
 
+Download the latest `MediaEngine.dmg` from the [**Releases Page**](https://github.com/jondana/MediaEngine/releases/latest).
+
 A dedicated, high-performance batch video encoder and deep media inspector engineered from the ground up for macOS and Apple Silicon. MediaEngine leverages native Apple VideoToolbox hardware encoding blocks, intelligent dynamic thread/resolution scheduling, and perceptual temporal noise reduction to produce ultra-compact, visually lossless masters and edit-ready files.
 
 [![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2011.0%2B-000000.svg?style=flat-square&logo=apple)](https://www.apple.com/macos/)
