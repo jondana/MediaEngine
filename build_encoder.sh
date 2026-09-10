@@ -1101,11 +1101,12 @@ class QuartzActiveJobsCanvas(tk.Canvas):
     CARD_GAP = 4
     ROW_STEP = 38
 
-    def __init__(self, master, on_layout_needed=None, **kwargs):
+    def __init__(self, master, on_layout_needed=None, on_job_done_ui=None, **kwargs):
         super().__init__(master, bg=CARD_BG, bd=0, highlightthickness=0, relief="flat", **kwargs)
         self.jobs = {}
         self.job_order = []
         self.on_layout_needed = on_layout_needed
+        self.on_job_done_ui = on_job_done_ui
         self._anim_job = None
         self._last_tween_time = 0.0
         self.scroller = QuartzKineticScroller(
@@ -1238,6 +1239,9 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                     job["metrics_fade_start"] = now
                     if not needs_full_redraw:
                         self._update_job_pbar(iid, 100.0)
+                    if getattr(self, "on_job_done_ui", None):
+                        try: self.on_job_done_ui(iid)
+                        except Exception: pass
 
             if job.get("is_done_ui") and "metrics_fade_start" in job:
                 try:
@@ -1361,6 +1365,9 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             if item_id in self.job_order:
                 self.job_order.remove(item_id)
             self.redraw_all()
+            if completed and getattr(self, "on_job_done_ui", None):
+                try: self.on_job_done_ui(item_id)
+                except Exception: pass
             return
 
         if job.get("state") in ("holding", "fading", "dead"):
@@ -1386,6 +1393,9 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                 job["hold_start"] = now
                 job["metrics_fade_start"] = now
                 self.redraw_all()
+                if getattr(self, "on_job_done_ui", None):
+                    try: self.on_job_done_ui(item_id)
+                    except Exception: pass
             else:
                 job["hold_start"] = now
         else:
@@ -1946,7 +1956,7 @@ class QuartzQueueCanvas(tk.Canvas):
                 s_parts.append(f"DN {d_int}")
         settings_str = " • ".join(s_parts)
 
-        done_str = item.get("done_stats", "")
+        done_str = item.get("done_stats", "") if status == "completed" else ""
         raw_name = item.get("display_name", item.get("filename", ""))
         avail_w = max(40, (left_cx - 16) - (x1 + 12))
         settings_w = int(len(settings_str) * 6.0) if settings_str else 0
@@ -3114,7 +3124,7 @@ class EncoderApp:
         self.active_jobs_inner.pack(fill="x", expand=True)
 
         self.active_jobs_scrollbar = ctk.CTkScrollbar(self.active_jobs_inner, command=self._on_active_scrollbar_drag, fg_color="transparent", button_color="#262626", button_hover_color="#333333", width=10, height=self.active_jobs_height)
-        self.active_jobs_canvas = QuartzActiveJobsCanvas(self.active_jobs_inner, height=self.active_jobs_height, on_layout_needed=self.update_active_jobs_layout)
+        self.active_jobs_canvas = QuartzActiveJobsCanvas(self.active_jobs_inner, height=self.active_jobs_height, on_layout_needed=self.update_active_jobs_layout, on_job_done_ui=self.on_active_job_done)
         self.active_jobs_canvas.pack(side="left", fill="both", expand=True, padx=(0, 2), pady=0)
         self.active_jobs_canvas.configure(yscrollcommand=self._on_active_jobs_scroll_update)
 
@@ -4423,6 +4433,19 @@ class EncoderApp:
 
     def update_item_status_ui(self, item_id, status, progress_text=None, refresh_stats=False, done_stats=None):
         self.ui_queue.put(("item_status", (item_id, status, progress_text, refresh_stats, done_stats)))
+
+    def on_active_job_done(self, item_id):
+        with self.queue_lock:
+            item = self.items_by_id.get(item_id)
+            if item and item.get("status") not in ("cancelled", "failed"):
+                item["status"] = "completed"
+                dstats = item.pop("pending_done_stats", None)
+                if dstats is not None:
+                    item["done_stats"] = dstats
+                else:
+                    dstats = item.get("done_stats", "")
+                self.canvas_queue.update_item_status(item_id, "completed", done_stats=dstats)
+                self._update_queue_stats()
 
     def set_app_state(self, state):
         self.ui_queue.put(("app_state", state))
@@ -6229,11 +6252,9 @@ class EncoderApp:
                     stats_str = ""
                     self.append_log(f"✔ [COMPLETE] {display_name}\n")
                 with self.queue_lock:
-                    current_item["status"] = "completed"
-                    current_item["done_stats"] = stats_str
+                    current_item["pending_done_stats"] = stats_str
                 with self.process_lock:
                     self.active_output_files.pop(item_id, None)
-                self.update_item_status_ui(item_id, "completed", refresh_stats=True, done_stats=stats_str)
             else:
                 if is_cancelled:
                     self.append_log(f"⚠ [CANCELLED] Skipped: {display_name}\n")
@@ -6271,7 +6292,7 @@ class EncoderApp:
                     try:
                         active_proc.wait(timeout=0.5)
                     except Exception: pass
-            if current_item.get("status") != "completed" and out_file and os.path.exists(out_file):
+            if not is_completed and out_file and os.path.exists(out_file):
                 try:
                     os.remove(out_file)
                 except OSError:
