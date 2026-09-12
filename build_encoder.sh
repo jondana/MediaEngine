@@ -552,7 +552,9 @@ def get_default_presets():
             "chroma": chroma,
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
-            "denoise": "10"
+            "denoise": "10",
+            "audio": "LPCM 24-bit",
+            "container": "mov"
         },
         "Non-Log Footage": {
             "codec": "HEVC (H.265)",
@@ -560,7 +562,9 @@ def get_default_presets():
             "chroma": "10-Bit 4:2:0",
             "quality": "58",
             "quality_encoder": "AppleMediaEngine",
-            "denoise": "12"
+            "denoise": "12",
+            "audio": "AAC",
+            "container": "mp4"
         },
         "Screen Recordings": {
             "codec": "HEVC (H.265)",
@@ -568,7 +572,9 @@ def get_default_presets():
             "chroma": "10-Bit 4:2:0",
             "quality": "52",
             "quality_encoder": "AppleMediaEngine",
-            "denoise": "0"
+            "denoise": "0",
+            "audio": "AAC",
+            "container": "mp4"
         },
         "Custom": {
             "codec": "HEVC (H.265)",
@@ -576,7 +582,9 @@ def get_default_presets():
             "chroma": chroma,
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
-            "denoise": "10"
+            "denoise": "10",
+            "audio": "LPCM 24-bit",
+            "container": "mov"
         }
     }
 
@@ -4240,7 +4248,9 @@ class EncoderApp:
                     "chroma": settings["chroma"],
                     "quality": str(int(round(float(settings["quality"])))),
                     "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
-                    "denoise": str(settings["denoise"])
+                    "denoise": str(settings["denoise"]),
+                    "audio": settings.get("audio", "LPCM 24-bit"),
+                    "container": settings.get("container", "mov")
                 }
                 self.save_presets_to_disk()
             except Exception:
@@ -4552,6 +4562,8 @@ class EncoderApp:
             self.save_last_preset_choice(name)
             self._preset_loading = True
             p = self.presets[name]
+            self.current_audio = p.get("audio", "LPCM 24-bit" if name in ("Log Footage", "Custom") else "AAC")
+            self.current_container = p.get("container", "mov" if name in ("Log Footage", "Custom") else "mp4")
             self.codec_var.set(p.get("codec", "HEVC (H.265)"))
             self.current_encoder = p.get("encoder", "AppleMediaEngine")
             self.encoder_var.set(self.current_encoder)
@@ -4733,8 +4745,14 @@ class EncoderApp:
         except Exception: q_val = 69 if self.encoder_var.get() == "AppleMediaEngine" else 33
 
         dest_dir = self.dest_var.get().strip() or os.path.expanduser("~/Desktop")
+        preset_name = self.preset_var.get() if hasattr(self, "preset_var") else "Log Footage"
+        cur_audio = getattr(self, "current_audio", "LPCM 24-bit" if preset_name in ("Log Footage", "Custom") else "AAC")
+        cur_container = getattr(self, "current_container", "mov" if preset_name in ("Log Footage", "Custom") else "mp4")
         return {
             "dest_dir": os.path.expanduser(dest_dir),
+            "preset": preset_name,
+            "audio": cur_audio,
+            "container": cur_container,
             "codec": self.codec_var.get(),
             "encoder": self.encoder_var.get(),
             "chroma": self.chroma_var.get(),
@@ -5392,7 +5410,7 @@ class EncoderApp:
             if fps_cand and 1.0 <= fps_cand <= 300.0: fps = fps_cand
         return duration, fps, width, height, timecode, pix_fmt
 
-    def get_audio_args(self, filepath, probe_data=None):
+    def get_audio_args(self, filepath, probe_data=None, keep_pcm=False):
         data = probe_data if (probe_data and probe_data.get("streams")) else self.probe_media_file(filepath)
         streams = [s for s in data.get("streams", []) if s.get("codec_type") == "audio"]
         args = []
@@ -5414,7 +5432,10 @@ class EncoderApp:
                 except (ValueError, TypeError):
                     is_zero_start = False
             args.extend(["-map", f"0:{s_idx}"])
-            if codec == "aac" and is_zero_start:
+            if keep_pcm and ("pcm" in codec or codec in ("wav", "aiff")):
+                pcm_target = "pcm_s16le" if ("16" in codec and "24" not in codec and "32" not in codec) else "pcm_s24le"
+                args.extend([f"-c:a:{out_a_idx}", pcm_target])
+            elif codec == "aac" and is_zero_start:
                 args.extend([f"-c:a:{out_a_idx}", "copy"])
             elif ch > 8:
                 args.extend([f"-c:a:{out_a_idx}", "aac", f"-ac:a:{out_a_idx}", "2", f"-b:a:{out_a_idx}", "256k"])
@@ -5795,7 +5816,12 @@ class EncoderApp:
                     elif "10-Bit" in chroma_choice: profile_str, pix_fmt_str = "main10", "yuv420p10le"
                     else: profile_str, pix_fmt_str = "main", "yuv420p"
 
-            out_ext = ".mov" if (has_alpha and not is_h264) else ".mp4"
+            has_pcm_audio = any("pcm" in str(s.get("codec_name", "")).lower() or str(s.get("codec_name", "")).lower() in ("wav", "aiff") for s in probe.get("streams", []) if s.get("codec_type") == "audio")
+            preset_name = settings.get("preset", "")
+            target_container = settings.get("container", "mov" if preset_name in ("Log Footage", "Custom") else "mp4")
+            keep_lpcm = (target_container == "mov" or preset_name in ("Log Footage", "Custom")) and has_pcm_audio
+
+            out_ext = ".mov" if (keep_lpcm or (has_alpha and not is_h264) or target_container == "mov") else ".mp4"
             settings_tag = get_settings_filename_tag(settings) if settings.get("tag_settings", False) else ""
             out_file, lock_file = generate_safe_output_path(f, dest_dir, rel_dir=rel_dir, ext=out_ext, suffix=settings_tag)
             with self.process_lock:
@@ -5803,7 +5829,7 @@ class EncoderApp:
 
             gop_size = max(48, int(round(fps * 3)))
             min_keyint = max(1, int(round(fps)))
-            audio_args = self.get_audio_args(f, probe_data=probe)
+            audio_args = self.get_audio_args(f, probe_data=probe, keep_pcm=keep_lpcm)
             if not audio_args:
                 audio_args = ["-map", "0:a?", "-c:a", "copy"]
             subtitle_args = self.get_subtitle_args(f, probe_data=probe)
@@ -5899,9 +5925,10 @@ class EncoderApp:
             self.update_item_status_ui(item_id, "encoding", "0%", refresh_stats=True)
             res_lbl = get_common_resolution_label(width, height).strip(" ()") or f"{width}x{height}"
             enc_name = "AppleMediaEngine" if is_videotoolbox else "CPU (Software)"
+            audio_tag_str = "24-Bit LPCM" if keep_lpcm else ("AAC" if audio_args else "None")
             self.append_log(
                 f"\n▶ [START] {display_name}\n"
-                f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info} • Denoise: {denoise_desc}\n"
+                f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info} • Audio: {audio_tag_str} • Denoise: {denoise_desc}\n"
                 f"  • Source:   {width}x{height} ({res_lbl}) @ {fps:.2f} fps • {format_time_duration(duration, duration >= 3600)}\n"
                 f"  • Output:   {out_file}\n"
             )
