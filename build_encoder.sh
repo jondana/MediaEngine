@@ -303,12 +303,12 @@ AUTO_START_FILE = os.path.join(USER_PRESETS_DIR, "auto_start.txt")
 TAG_SETTINGS_FILE = os.path.join(USER_PRESETS_DIR, "tag_settings.txt")
 
 SUPPORTED_EXTENSIONS = (
-    ".mp4", ".mov", ".mkv", ".m4v", ".avi", ".crm",
-    ".raw", ".wmv", ".flv", ".webm", ".ts", ".mts", ".m2ts"
+    ".mp4", ".mov", ".mkv", ".m4v", ".avi",
+    ".wmv", ".flv", ".webm", ".ts", ".mts", ".m2ts"
 )
 
 MEDIA_INSPECT_EXTENSIONS = (
-    ".mp4", ".mov", ".mkv", ".m4v", ".avi", ".crm", ".raw", ".wmv", ".flv",
+    ".mp4", ".mov", ".mkv", ".m4v", ".avi", ".wmv", ".flv",
     ".webm", ".ts", ".mts", ".m2ts", ".vob", ".ogv", ".m2v", ".mxf",
     ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".webp", ".heic", ".bmp", ".gif", ".dng",
     ".mp3", ".wav", ".aac", ".m4a", ".flac", ".aiff", ".aif", ".ogg", ".wma", ".opus", ".m4r"
@@ -502,7 +502,7 @@ def parse_stream_fps_val(stream):
     return None
 
 INSPECTOR_EXTENSIONS = (
-    ".mp4", ".mov", ".mkv", ".m4v", ".avi", ".crm", ".raw", ".wmv", ".flv",
+    ".mp4", ".mov", ".mkv", ".m4v", ".avi", ".wmv", ".flv",
     ".webm", ".ts", ".mts", ".m2ts", ".wav", ".mp3", ".aac", ".flac", ".m4a",
     ".jpg", ".jpeg", ".png", ".tiff", ".webp", ".bmp", ".heic", ".exr"
 )
@@ -3381,7 +3381,7 @@ class EncoderApp:
 
         sections = [
             ("1. OVERVIEW & ARCHITECTURE",
-             "MediaEngine is engineered specifically for demanding production and cinema workflows (such as 8K Canon Cinema RAW Light & C-Log3), compressing massive takes down to 30–40 Mbps while preserving full 10-bit color accuracy and grading headroom.",
+             "MediaEngine is engineered specifically for demanding production and cinema workflows (such as 8K ProRes & C-Log3), compressing massive takes down to 30–40 Mbps while preserving full 10-bit color accuracy and grading headroom.",
              [
                  ("Native Apple Silicon", "Optimized directly for macOS hardware media encode and decode engines."),
                  ("Zero Ingest Stalls", "Drag in hundreds of clips instantly without preliminary preview stalls or caching delays."),
@@ -6446,7 +6446,7 @@ if os.path.exists(plist_path):
         "CFBundleRole": "Viewer",
         "LSHandlerRank": "Alternate",
         "LSItemContentTypes": ["public.movie", "public.video", "public.audio", "public.image", "public.folder", "public.directory"],
-        "CFBundleTypeExtensions": ["mp4", "mov", "mkv", "m4v", "avi", "crm", "raw", "wmv", "flv", "webm", "ts", "mts", "m2ts", "wav", "mp3", "aac", "flac", "png", "jpg", "jpeg", "tiff"]
+        "CFBundleTypeExtensions": ["mp4", "mov", "mkv", "m4v", "avi", "wmv", "flv", "webm", "ts", "mts", "m2ts", "wav", "mp3", "aac", "flac", "png", "jpg", "jpeg", "tiff"]
     }]
     pl["NSHighResolutionCapable"] = True
     pl["NSRequiresAquaSystemAppearance"] = False
