@@ -5855,6 +5855,42 @@ class EncoderApp:
             vf_filters = []
             if width % 2 != 0 or height % 2 != 0: vf_filters.insert(0, f"scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic")
 
+            # Emulate Apple AVAssetExportSession: auto-pad video tail to audio duration & conform low/VFR framerates
+            has_vid = (width > 0 and height > 0)
+            v_s0_probe = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video" and (s.get("disposition", {}) or {}).get("attached_pic") != 1), None)
+            v_stream_dur = 0.0
+            if v_s0_probe:
+                try: v_stream_dur = float(v_s0_probe.get("duration", 0) or 0)
+                except (ValueError, TypeError): v_stream_dur = 0.0
+                if v_stream_dur <= 0 and "tags" in v_s0_probe:
+                    v_tags_d = {str(k).lower(): v for k, v in v_s0_probe["tags"].items()}
+                    d_tag = v_tags_d.get("duration") or v_tags_d.get("duration-eng")
+                    if d_tag:
+                        try:
+                            if ":" in str(d_tag):
+                                dp = str(d_tag).split(":")
+                                v_stream_dur = float(dp[0]) * 3600 + float(dp[1]) * 60 + float(dp[2])
+                            else:
+                                v_stream_dur = float(d_tag)
+                        except Exception: pass
+                if v_stream_dur <= 0 and fps > 0:
+                    try:
+                        nb_f = int(v_s0_probe.get("nb_frames") or 0)
+                        if nb_f > 0: v_stream_dur = nb_f / float(fps)
+                    except Exception: pass
+
+            is_vfr_or_low = (fps < 23.976) or (v_s0_probe and "vfr" in get_frame_rate_mode(v_s0_probe).lower())
+            if is_vfr_or_low and has_vid:
+                target_fps = 30.0 if fps < 23.976 else fps
+                vf_filters.append(f"fps=fps={target_fps}:round=near")
+                self.append_log(f"ℹ️ [CFR CONFORM] Low/Variable framerate ({fps:.2f} fps) detected. Conformed to {target_fps:.0f} fps CFR for FCP compatibility.\n")
+                fps = target_fps
+
+            if has_vid and v_stream_dur > 0 and duration > (v_stream_dur + 0.08):
+                tail_pad = duration - v_stream_dur
+                vf_filters.append(f"tpad=stop_mode=clone:stop_duration={tail_pad:.3f}")
+                self.append_log(f"ℹ️ [AV-SYNC] Video stream ({v_stream_dur:.2f}s) is shorter than audio ({duration:.2f}s). Padded tail by {tail_pad:.2f}s with cloned frames.\n")
+
             denoise_log_info = denoise_desc
             if has_alpha:
                 if denoise_val > 0:
@@ -5944,7 +5980,7 @@ class EncoderApp:
             is_10bit = any(x in pix_fmt_in for x in ("10le", "10be", "p010", "p210", "10")) or ("10" in in_profile)
             is_h264_input = in_codec in ("h264", "avc", "avc1")
             can_hwaccel_dec = (
-                has_video and not wide_or_hdr and not has_alpha and (
+                has_video and not wide_or_hdr and not has_alpha and not is_vfr_or_low and (
                     ("hevc" in in_codec or "h265" in in_codec) or
                     ("prores" in in_codec) or
                     (is_h264_input and not is_10bit)
@@ -5987,7 +6023,7 @@ class EncoderApp:
 
                 cmd.extend(["-c:v", codec_name])
                 if profile_str: cmd.extend(["-profile:v", profile_str])
-                cmd.extend(["-pix_fmt", pix_fmt_str])
+                cmd.extend(["-pix_fmt", pix_fmt_str, "-fps_mode:v", "cfr"])
                 if not has_alpha and "4:2:2" not in chroma_choice: cmd.extend(["-chroma_sample_location", "topleft" if wide_or_hdr else "left"])
                 if not (has_alpha and is_videotoolbox):
                     cmd.extend(["-color_range", range_ff])
@@ -6131,7 +6167,9 @@ class EncoderApp:
 
                 v_s0 = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video" and (s.get("disposition", {}) or {}).get("attached_pic") != 1), None)
                 total_frames = 0
-                if v_s0:
+                if is_vfr_or_low and duration > 0 and fps > 0:
+                    total_frames = int(round(duration * fps))
+                elif v_s0:
                     try: total_frames = int(v_s0.get("nb_frames") or 0)
                     except (ValueError, TypeError): total_frames = 0
                 if total_frames <= 0 and duration > 0 and fps > 0:
