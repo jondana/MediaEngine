@@ -5980,10 +5980,9 @@ class EncoderApp:
             is_10bit = any(x in pix_fmt_in for x in ("10le", "10be", "p010", "p210", "10")) or ("10" in in_profile)
             is_h264_input = in_codec in ("h264", "avc", "avc1")
             can_hwaccel_dec = (
-                has_video and not wide_or_hdr and not has_alpha and not is_vfr_or_low and (
+                has_video and not wide_or_hdr and not has_alpha and not is_vfr_or_low and not is_h264_input and (
                     ("hevc" in in_codec or "h265" in in_codec) or
-                    ("prores" in in_codec) or
-                    (is_h264_input and not is_10bit)
+                    ("prores" in in_codec)
                 )
             )
 
@@ -5992,8 +5991,8 @@ class EncoderApp:
                 cmd.extend(["-hwaccel", "videotoolbox"])
             elif is_videotoolbox and wide_or_hdr and has_video:
                 self.append_log(f"ℹ️ [INFO] HDR stream detected for '{display_name}'. Using software decoding to preserve HDR10 mastering display and light level side data.\n")
-            elif is_videotoolbox and is_h264_input and is_10bit and has_video:
-                self.append_log(f"ℹ️ [INFO] 10-Bit H.264 input detected for '{display_name}'. Using software decoding to prevent hardware decode corruption.\n")
+            elif is_videotoolbox and is_h264_input and has_video:
+                self.append_log(f"ℹ️ [INFO] H.264 input detected for '{display_name}'. Using software decoding to prevent VideoToolbox decode stutter.\n")
             if is_videotoolbox:
                 threads_per_proc = "4"
             else:
