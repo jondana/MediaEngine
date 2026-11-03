@@ -5366,7 +5366,7 @@ class EncoderApp:
         return self.probe_media_file(item_or_path)
 
     def get_video_stream_info(self, filepath, probe_data=None):
-        duration, fps, width, height, timecode, pix_fmt = 0.0, 30.0, 0, 0, None, ""
+        duration, fps, width, height, timecode, pix_fmt = 0.0, 29.97, 0, 0, None, ""
         data = probe_data if (probe_data and probe_data.get("streams")) else self.probe_media_file(filepath)
         fdata = data.get("format", {})
         if "duration" in fdata:
@@ -5881,9 +5881,9 @@ class EncoderApp:
 
             is_vfr_or_low = (fps < 23.976) or (v_s0_probe and "vfr" in get_frame_rate_mode(v_s0_probe).lower())
             if is_vfr_or_low and has_vid:
-                target_fps = 30.0 if fps < 23.976 else fps
+                target_fps = 29.97 if (fps < 23.976 or abs(fps - 30.0) < 0.5) else fps
                 vf_filters.append(f"fps=fps={target_fps}:round=near")
-                self.append_log(f"ℹ️ [CFR CONFORM] Low/Variable framerate ({fps:.2f} fps) detected. Conformed to {target_fps:.0f} fps CFR for FCP compatibility.\n")
+                self.append_log(f"ℹ️ [CFR CONFORM] Low/Variable framerate ({fps:.2f} fps) detected. Conformed to {target_fps:.2f} fps CFR for FCP compatibility.\n")
                 fps = target_fps
 
             if has_vid and v_stream_dur > 0 and duration > (v_stream_dur + 0.08):
