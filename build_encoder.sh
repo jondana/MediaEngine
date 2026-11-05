@@ -550,6 +550,7 @@ def get_default_presets():
             "codec": "HEVC (H.265)",
             "encoder": "AppleMediaEngine",
             "chroma": chroma,
+            "resolution": "Original",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
             "denoise": "10",
@@ -560,6 +561,7 @@ def get_default_presets():
             "codec": "HEVC (H.265)",
             "encoder": "AppleMediaEngine",
             "chroma": "10-Bit 4:2:0",
+            "resolution": "Original",
             "quality": "58",
             "quality_encoder": "AppleMediaEngine",
             "denoise": "12",
@@ -570,6 +572,7 @@ def get_default_presets():
             "codec": "HEVC (H.265)",
             "encoder": "AppleMediaEngine",
             "chroma": "10-Bit 4:2:0",
+            "resolution": "Original",
             "quality": "52",
             "quality_encoder": "AppleMediaEngine",
             "denoise": "0",
@@ -580,6 +583,7 @@ def get_default_presets():
             "codec": "HEVC (H.265)",
             "encoder": "AppleMediaEngine",
             "chroma": chroma,
+            "resolution": "Original",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
             "denoise": "10",
@@ -816,6 +820,13 @@ def get_settings_filename_tag(settings):
     if chroma:
         clean_chroma = chroma.replace("-Bit", "bit").replace(":", "")
         parts.append(clean_chroma)
+    res_tag = settings.get("resolution", "")
+    if "4K" in res_tag or "2160" in res_tag:
+        parts.append("4K")
+    elif "1080" in res_tag:
+        parts.append("1080p")
+    elif "720" in res_tag:
+        parts.append("720p")
     q = settings.get("quality")
     if q is not None:
         try:
@@ -1941,6 +1952,13 @@ class QuartzQueueCanvas(tk.Canvas):
             s_parts.append(f"{c_name} (CPU)" if enc == "CPU" else c_name)
             if st.get("chroma"):
                 s_parts.append(st["chroma"])
+            r_tag = st.get("resolution", "")
+            if "4K" in r_tag or "2160" in r_tag:
+                s_parts.append("4K")
+            elif "1080" in r_tag:
+                s_parts.append("1080p")
+            elif "720" in r_tag:
+                s_parts.append("720p")
             q = st.get("quality")
             if q is not None:
                 try:
@@ -2587,6 +2605,11 @@ class EncoderApp:
             s_parts = [f"{c_name} (CPU)" if enc == "CPU" else c_name]
             if hasattr(self, "chroma_var") and self.chroma_var.get():
                 s_parts.append(self.chroma_var.get())
+            if hasattr(self, "resolution_var"):
+                r_v = self.resolution_var.get()
+                if "4K" in r_v or "2160" in r_v: s_parts.append("4K")
+                elif "1080" in r_v: s_parts.append("1080p")
+                elif "720" in r_v: s_parts.append("720p")
             if hasattr(self, "quality_slider"):
                 q = int(round(float(self.quality_slider.get())))
                 crf_disp = max(0, min(51, 51 - q)) if enc == "CPU" else q
@@ -2980,6 +3003,19 @@ class EncoderApp:
         chroma_opts = ["10-Bit 4:2:2", "10-Bit 4:2:0", "8-Bit 4:2:0"] if HAS_VT_422 else ["10-Bit 4:2:0", "8-Bit 4:2:0"]
         self.chroma_cb = ctk.CTkOptionMenu(r2, values=chroma_opts, variable=self.chroma_var, command=lambda v: self.mark_custom_settings(), height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"))
         self.chroma_cb.pack(side="left", fill="x", expand=True)
+
+        # Row 2.5: Resolution Dropdown
+        r_res = ctk.CTkFrame(self.settings_body, fg_color="transparent")
+        r_res.pack(fill="x", padx=14, pady=3)
+        ctk.CTkLabel(r_res, text="Resolution", width=65, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
+        self.resolution_var = ctk.StringVar(value="Original")
+        self.resolution_cb = ctk.CTkOptionMenu(
+            r_res, values=["Original", "4K UHD (2160p)", "1080p (Full HD)", "720p (HD)"],
+            variable=self.resolution_var, command=lambda v: self.mark_custom_settings(),
+            height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
+            font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")
+        )
+        self.resolution_cb.pack(side="left", fill="x", expand=True)
 
         # Row 3: Quality
         r_quality = ctk.CTkFrame(self.settings_body, fg_color="transparent")
@@ -4246,6 +4282,7 @@ class EncoderApp:
                     "codec": settings.get("codec", "HEVC (H.265)"),
                     "encoder": settings["encoder"],
                     "chroma": settings["chroma"],
+                    "resolution": settings.get("resolution", "Original"),
                     "quality": str(int(round(float(settings["quality"])))),
                     "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
                     "denoise": str(settings["denoise"]),
@@ -4285,6 +4322,7 @@ class EncoderApp:
             "codec": settings.get("codec", "HEVC (H.265)"),
             "encoder": settings["encoder"],
             "chroma": settings["chroma"],
+            "resolution": settings.get("resolution", "Original"),
             "quality": str(int(round(float(settings["quality"])))),
             "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
             "denoise": str(settings["denoise"])
@@ -4570,6 +4608,9 @@ class EncoderApp:
             chroma_setting = p.get("chroma", DEFAULT_CHROMA)
             if not HAS_VT_422 and "4:2:2" in chroma_setting: chroma_setting = "10-Bit 4:2:0"
             self.chroma_var.set(chroma_setting)
+            res_setting = p.get("resolution", "Original")
+            if hasattr(self, "resolution_var"):
+                self.resolution_var.set(res_setting if res_setting in self.resolution_cb.cget("values") else "Original")
             self.sync_encoder_ui()
             try: q_val = int(float(p.get("quality", 69)))
             except ValueError: q_val = 69
@@ -4756,6 +4797,7 @@ class EncoderApp:
             "codec": self.codec_var.get(),
             "encoder": self.encoder_var.get(),
             "chroma": self.chroma_var.get(),
+            "resolution": self.resolution_var.get() if hasattr(self, "resolution_var") else "Original",
             "denoise": denoise_val,
             "quality": q_val,
             "quality_encoder": self.encoder_var.get(),
@@ -5156,6 +5198,9 @@ class EncoderApp:
                 if not HAS_VT_422 and "4:2:2" in chr_val:
                     chr_val = "10-Bit 4:2:0"
                 self.chroma_var.set(chr_val)
+                if "resolution" in st and hasattr(self, "resolution_var"):
+                    r_v = st.get("resolution", "Original")
+                    self.resolution_var.set(r_v if r_v in self.resolution_cb.cget("values") else "Original")
 
                 q_val = int(st.get("quality", 69))
                 q_enc = st.get("quality_encoder", e_val)
@@ -5747,6 +5792,7 @@ class EncoderApp:
             is_h264 = ("H.264" in codec_choice)
             encoder_choice = settings.get("encoder", "AppleMediaEngine")
             chroma_choice = settings.get("chroma", "10-Bit 4:2:2")
+            res_choice = settings.get("resolution", "Original")
             denoise_raw = float(settings.get("denoise", 10))
             denoise_val = int(round(denoise_raw * 1000)) if 0.0 < denoise_raw < 1.0 else int(round(denoise_raw))
             q_val = settings.get("quality", 69)
@@ -5766,6 +5812,22 @@ class EncoderApp:
             else:
                 duration, fps, width, height, timecode, pix_fmt_in = self.get_video_stream_info(f, probe_data=probe)
                 current_item["video_info"] = (duration, fps, width, height, timecode, pix_fmt_in)
+
+            target_w, target_h = None, None
+            max_w, max_h = None, None
+            if "4K" in res_choice or "2160" in res_choice:
+                max_w, max_h = (2160, 3840) if height > width else (3840, 2160)
+            elif "1080" in res_choice:
+                max_w, max_h = (1080, 1920) if height > width else (1920, 1080)
+            elif "720" in res_choice:
+                max_w, max_h = (720, 1280) if height > width else (1280, 720)
+
+            if max_w and max_h and width > 0 and height > 0:
+                if width > max_w or height > max_h:
+                    scale_f = min(max_w / float(width), max_h / float(height))
+                    target_w = int(round(width * scale_f / 2.0)) * 2
+                    target_h = int(round(height * scale_f / 2.0)) * 2
+
             has_alpha = any(a in pix_fmt_in for a in ("yuva", "rgba", "bgra", "argb", "abgr", "gbrpa", "gbrap", "ya8", "ya16"))
 
             if has_alpha and (not is_videotoolbox or is_h264):
@@ -5853,7 +5915,10 @@ class EncoderApp:
             range_num = 1 if range_ff == "full" else 0
 
             vf_filters = []
-            if width % 2 != 0 or height % 2 != 0: vf_filters.insert(0, f"scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic")
+            if target_w and target_h and (target_w != width or target_h != height):
+                vf_filters.append(f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd")
+            elif width % 2 != 0 or height % 2 != 0:
+                vf_filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic")
 
             # Emulate Apple AVAssetExportSession: auto-pad video tail to audio duration & conform low/VFR framerates
             has_vid = (width > 0 and height > 0)
@@ -5962,9 +6027,10 @@ class EncoderApp:
             res_lbl = get_common_resolution_label(width, height).strip(" ()") or f"{width}x{height}"
             enc_name = "AppleMediaEngine" if is_videotoolbox else "CPU (Software)"
             audio_tag_str = "24-Bit LPCM" if keep_lpcm else ("AAC" if audio_args else "None")
+            scale_log = f" • Scale: {target_w}x{target_h} [Lanczos]" if (target_w and target_h and target_w != width) else ""
             self.append_log(
                 f"\n▶ [START] {display_name}\n"
-                f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info} • Audio: {audio_tag_str} • Denoise: {denoise_desc}\n"
+                f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info}{scale_log} • Audio: {audio_tag_str} • Denoise: {denoise_desc}\n"
                 f"  • Source:   {width}x{height} ({res_lbl}) @ {fps:.2f} fps • {format_time_duration(duration, duration >= 3600)}\n"
                 f"  • Output:   {out_file}\n"
             )
@@ -6017,7 +6083,7 @@ class EncoderApp:
                     if ";" in tc_str and not (29.9 < fps < 30.05 or 59.9 < fps < 60.05): tc_str = tc_str.replace(";", ":")
                     if re.match(r"^\d{2}:\d{2}:\d{2}[:;]\d{2}$", tc_str): cmd.extend(["-timecode", tc_str])
 
-                cmd.extend(["-sws_flags", "bicubic+accurate_rnd"])
+                cmd.extend(["-sws_flags", "lanczos+accurate_rnd"])
                 if vf_filters: cmd.extend(["-vf", ",".join(vf_filters)])
 
                 cmd.extend(["-c:v", codec_name])
@@ -6037,8 +6103,10 @@ class EncoderApp:
                     cmd.extend(["-allow_sw", "1"])
                     if has_alpha:
                         cmd.extend(["-alpha_quality", "0.75"])
-                    is_8k = (width >= 7000 or height >= 4000)
-                    vt_extra = ["-realtime", "1", "-prio_speed", "1"] if is_8k else (
+                    eff_w = target_w if target_w else width
+                    eff_h = target_h if target_h else height
+                    is_8k_enc = (eff_w >= 7000 or eff_h >= 4000)
+                    vt_extra = ["-realtime", "1", "-prio_speed", "1"] if is_8k_enc else (
                         (["-spatial_aq", "1"] if HAS_VT_SPATIAL_AQ else []) +
                         ["-prio_speed", "0", "-realtime", "0", "-power_efficient", "0"]
                     )
