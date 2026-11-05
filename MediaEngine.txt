@@ -552,44 +552,66 @@ def get_default_presets():
             "encoder": "AppleMediaEngine",
             "chroma": chroma,
             "resolution": "Original",
+            "container": "Auto",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
             "denoise": "10",
-            "audio": "LPCM 24-bit",
-            "container": "mov"
+            "audio": "Auto"
         },
         "Non-Log Footage": {
             "codec": "HEVC (H.265)",
             "encoder": "AppleMediaEngine",
             "chroma": "10-Bit 4:2:0",
             "resolution": "Original",
+            "container": "MP4",
             "quality": "58",
             "quality_encoder": "AppleMediaEngine",
             "denoise": "12",
-            "audio": "AAC",
-            "container": "mp4"
+            "audio": "AAC"
         },
         "Screen Recordings": {
             "codec": "HEVC (H.265)",
             "encoder": "AppleMediaEngine",
             "chroma": "10-Bit 4:2:0",
             "resolution": "Original",
+            "container": "MP4",
             "quality": "52",
             "quality_encoder": "AppleMediaEngine",
             "denoise": "0",
-            "audio": "AAC",
-            "container": "mp4"
+            "audio": "AAC"
+        },
+        "H.264 MP4 CPU": {
+            "codec": "H.264",
+            "encoder": "CPU",
+            "chroma": "8-Bit 4:2:0",
+            "resolution": "4K UHD (2160p)",
+            "container": "MP4",
+            "quality": "33",
+            "quality_encoder": "CPU",
+            "denoise": "0",
+            "audio": "AAC"
+        },
+        "H.265 MP4 10-Bit": {
+            "codec": "HEVC (H.265)",
+            "encoder": "AppleMediaEngine",
+            "chroma": "10-Bit 4:2:0",
+            "resolution": "Original",
+            "container": "MP4",
+            "quality": "69",
+            "quality_encoder": "AppleMediaEngine",
+            "denoise": "0",
+            "audio": "AAC"
         },
         "Custom": {
             "codec": "HEVC (H.265)",
             "encoder": "AppleMediaEngine",
             "chroma": chroma,
             "resolution": "Original",
+            "container": "Auto",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
             "denoise": "10",
-            "audio": "LPCM 24-bit",
-            "container": "mov"
+            "audio": "Auto"
         }
     }
 
@@ -1960,6 +1982,9 @@ class QuartzQueueCanvas(tk.Canvas):
                 s_parts.append("1080p")
             elif "720" in r_tag:
                 s_parts.append("720p")
+            cnt_tag = st.get("container", "")
+            if cnt_tag and cnt_tag.upper() in ("MP4", "MOV"):
+                s_parts.append(cnt_tag.upper())
             q = st.get("quality")
             if q is not None:
                 try:
@@ -2611,6 +2636,10 @@ class EncoderApp:
                 if "4K" in r_v or "2160" in r_v: s_parts.append("4K")
                 elif "1080" in r_v: s_parts.append("1080p")
                 elif "720" in r_v: s_parts.append("720p")
+            if hasattr(self, "container_var"):
+                cnt_v = self.container_var.get()
+                if cnt_v and cnt_v != "Auto":
+                    s_parts.append(cnt_v)
             if hasattr(self, "quality_slider"):
                 q = int(round(float(self.quality_slider.get())))
                 crf_disp = max(0, min(51, 51 - q)) if enc == "CPU" else q
@@ -3005,7 +3034,7 @@ class EncoderApp:
         self.chroma_cb = ctk.CTkOptionMenu(r2, values=chroma_opts, variable=self.chroma_var, command=lambda v: self.mark_custom_settings(), height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"))
         self.chroma_cb.pack(side="left", fill="x", expand=True)
 
-        # Row 2.5: Resolution Dropdown
+        # Row 2.5: Resolution & Container Dropdowns
         r_res = ctk.CTkFrame(self.settings_body, fg_color="transparent")
         r_res.pack(fill="x", padx=14, pady=3)
         ctk.CTkLabel(r_res, text="Resolution", width=65, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
@@ -3013,10 +3042,20 @@ class EncoderApp:
         self.resolution_cb = ctk.CTkOptionMenu(
             r_res, values=["Original", "4K UHD (2160p)", "1080p (Full HD)", "720p (HD)"],
             variable=self.resolution_var, command=lambda v: self.mark_custom_settings(),
+            width=175, height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
+            font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")
+        )
+        self.resolution_cb.pack(side="left", padx=(0, 10))
+
+        ctk.CTkLabel(r_res, text="Container", width=68, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
+        self.container_var = ctk.StringVar(value="Auto")
+        self.container_cb = ctk.CTkOptionMenu(
+            r_res, values=["Auto", "MP4", "MOV"],
+            variable=self.container_var, command=lambda v: self.mark_custom_settings(),
             height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
             font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")
         )
-        self.resolution_cb.pack(side="left", fill="x", expand=True)
+        self.container_cb.pack(side="left", fill="x", expand=True)
 
         # Row 3: Quality
         r_quality = ctk.CTkFrame(self.settings_body, fg_color="transparent")
@@ -4284,11 +4323,11 @@ class EncoderApp:
                     "encoder": settings["encoder"],
                     "chroma": settings["chroma"],
                     "resolution": settings.get("resolution", "Original"),
+                    "container": settings.get("container", "Auto"),
                     "quality": str(int(round(float(settings["quality"])))),
                     "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
                     "denoise": str(settings["denoise"]),
-                    "audio": settings.get("audio", "LPCM 24-bit"),
-                    "container": settings.get("container", "mov")
+                    "audio": settings.get("audio", "Auto")
                 }
                 self.save_presets_to_disk()
             except Exception:
@@ -4324,9 +4363,11 @@ class EncoderApp:
             "encoder": settings["encoder"],
             "chroma": settings["chroma"],
             "resolution": settings.get("resolution", "Original"),
+            "container": settings.get("container", "Auto"),
             "quality": str(int(round(float(settings["quality"])))),
             "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
-            "denoise": str(settings["denoise"])
+            "denoise": str(settings["denoise"]),
+            "audio": settings.get("audio", "Auto")
         }
         self.save_presets_to_disk()
         self.save_last_preset_choice(preset_name)
@@ -4601,8 +4642,12 @@ class EncoderApp:
             self.save_last_preset_choice(name)
             self._preset_loading = True
             p = self.presets[name]
-            self.current_audio = p.get("audio", "LPCM 24-bit" if name in ("Log Footage", "Custom") else "AAC")
-            self.current_container = p.get("container", "mov" if name in ("Log Footage", "Custom") else "mp4")
+            c_val = str(p.get("container", "Auto")).strip().upper()
+            c_disp = c_val if c_val in ("MP4", "MOV") else "Auto"
+            self.current_container = c_disp
+            if hasattr(self, "container_var"):
+                self.container_var.set(c_disp)
+            self.current_audio = p.get("audio", "Auto")
             self.codec_var.set(p.get("codec", "HEVC (H.265)"))
             self.current_encoder = p.get("encoder", "AppleMediaEngine")
             self.encoder_var.set(self.current_encoder)
@@ -4788,8 +4833,8 @@ class EncoderApp:
 
         dest_dir = self.dest_var.get().strip() or os.path.expanduser("~/Desktop")
         preset_name = self.preset_var.get() if hasattr(self, "preset_var") else "Log Footage"
-        cur_audio = getattr(self, "current_audio", "LPCM 24-bit" if preset_name in ("Log Footage", "Custom") else "AAC")
-        cur_container = getattr(self, "current_container", "mov" if preset_name in ("Log Footage", "Custom") else "mp4")
+        cur_container = self.container_var.get() if hasattr(self, "container_var") else getattr(self, "current_container", "Auto")
+        cur_audio = "LPCM 24-bit" if cur_container == "MOV" else ("AAC" if cur_container == "MP4" else "Auto")
         return {
             "dest_dir": os.path.expanduser(dest_dir),
             "preset": preset_name,
@@ -5202,6 +5247,9 @@ class EncoderApp:
                 if "resolution" in st and hasattr(self, "resolution_var"):
                     r_v = st.get("resolution", "Original")
                     self.resolution_var.set(r_v if r_v in self.resolution_cb.cget("values") else "Original")
+                if "container" in st and hasattr(self, "container_var"):
+                    c_v = st.get("container", "Auto")
+                    self.container_var.set(c_v if c_v in self.container_cb.cget("values") else "Auto")
 
                 q_val = int(st.get("quality", 69))
                 q_enc = st.get("quality_encoder", e_val)
@@ -5881,10 +5929,33 @@ class EncoderApp:
 
             has_pcm_audio = any("pcm" in str(s.get("codec_name", "")).lower() or str(s.get("codec_name", "")).lower() in ("wav", "aiff") for s in probe.get("streams", []) if s.get("codec_type") == "audio")
             preset_name = settings.get("preset", "")
-            target_container = settings.get("container", "mov" if preset_name in ("Log Footage", "Custom") else "mp4")
-            keep_lpcm = (target_container == "mov" or preset_name in ("Log Footage", "Custom")) and has_pcm_audio
+            container_mode = str(settings.get("container", "Auto")).strip().upper()
 
-            out_ext = ".mov" if (keep_lpcm or (has_alpha and not is_h264) or target_container == "mov") else ".mp4"
+            if container_mode == "MP4":
+                if has_alpha and not is_h264:
+                    self.append_log(f"ℹ️ [CONTAINER] Alpha channel transparency detected in '{display_name}'. Retaining .mov container to preserve alpha.\n")
+                    out_ext = ".mov"
+                    keep_lpcm = False
+                else:
+                    out_ext = ".mp4"
+                    keep_lpcm = False
+            elif container_mode == "MOV":
+                out_ext = ".mov"
+                keep_lpcm = has_pcm_audio
+            else:
+                # Auto (Smart) mode:
+                # Retains MOV with uncompressed 24-bit PCM for Log/Master workflows (preserving Canon R5 4-ch PCM),
+                # but uses universal MP4 (AAC) when no PCM is present or for standard distribution presets.
+                is_master_wf = (preset_name in ("Log Footage", "Custom")) or ("4:2:2" in chroma_choice)
+                if has_alpha and not is_h264:
+                    out_ext = ".mov"
+                    keep_lpcm = False
+                elif has_pcm_audio and is_master_wf:
+                    out_ext = ".mov"
+                    keep_lpcm = True
+                else:
+                    out_ext = ".mp4"
+                    keep_lpcm = False
             settings_tag = get_settings_filename_tag(settings) if settings.get("tag_settings", False) else ""
             out_file, lock_file = generate_safe_output_path(f, dest_dir, rel_dir=rel_dir, ext=out_ext, suffix=settings_tag)
             with self.process_lock:
