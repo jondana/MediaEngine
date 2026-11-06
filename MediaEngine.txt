@@ -582,12 +582,12 @@ def get_default_presets():
         },
         "H.264 MP4": {
             "codec": "H.264",
-            "encoder": "AppleMediaEngine",
+            "encoder": "CPU",
             "chroma": "8-Bit 4:2:0",
             "resolution": "4K UHD (2160p)",
             "container": "MP4",
-            "quality": "69",
-            "quality_encoder": "AppleMediaEngine",
+            "quality": "39",
+            "quality_encoder": "CPU",
             "denoise": "0",
             "audio": "AAC"
         },
