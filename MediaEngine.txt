@@ -552,6 +552,7 @@ def get_default_presets():
             "encoder": "AppleMediaEngine",
             "chroma": chroma,
             "resolution": "Original",
+            "framerate": "Original",
             "container": "Auto",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
@@ -563,6 +564,7 @@ def get_default_presets():
             "encoder": "AppleMediaEngine",
             "chroma": "10-Bit 4:2:0",
             "resolution": "Original",
+            "framerate": "Original",
             "container": "Auto",
             "quality": "58",
             "quality_encoder": "AppleMediaEngine",
@@ -574,6 +576,7 @@ def get_default_presets():
             "encoder": "AppleMediaEngine",
             "chroma": "10-Bit 4:2:0",
             "resolution": "Original",
+            "framerate": "30 fps",
             "container": "Auto",
             "quality": "52",
             "quality_encoder": "AppleMediaEngine",
@@ -585,6 +588,7 @@ def get_default_presets():
             "encoder": "CPU",
             "chroma": "8-Bit 4:2:0",
             "resolution": "4K UHD (2160p)",
+            "framerate": "Original",
             "container": "MP4",
             "quality": "39",
             "quality_encoder": "CPU",
@@ -596,6 +600,7 @@ def get_default_presets():
             "encoder": "AppleMediaEngine",
             "chroma": "10-Bit 4:2:0",
             "resolution": "Original",
+            "framerate": "Original",
             "container": "MP4",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
@@ -607,6 +612,7 @@ def get_default_presets():
             "encoder": "AppleMediaEngine",
             "chroma": chroma,
             "resolution": "Original",
+            "framerate": "Original",
             "container": "Auto",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
@@ -850,6 +856,9 @@ def get_settings_filename_tag(settings):
         parts.append("1080p")
     elif "720" in res_tag:
         parts.append("720p")
+    fps_tag = settings.get("framerate", "")
+    if fps_tag and fps_tag != "Original":
+        parts.append(fps_tag.replace(" ", ""))
     q = settings.get("quality")
     if q is not None:
         try:
@@ -1982,6 +1991,9 @@ class QuartzQueueCanvas(tk.Canvas):
                 s_parts.append("1080p")
             elif "720" in r_tag:
                 s_parts.append("720p")
+            fps_tag = st.get("framerate", "")
+            if fps_tag and fps_tag != "Original":
+                s_parts.append(fps_tag)
             cnt_tag = st.get("container", "")
             if cnt_tag and cnt_tag.upper() in ("MP4", "MOV"):
                 s_parts.append(cnt_tag.upper())
@@ -2636,6 +2648,10 @@ class EncoderApp:
                 if "4K" in r_v or "2160" in r_v: s_parts.append("4K")
                 elif "1080" in r_v: s_parts.append("1080p")
                 elif "720" in r_v: s_parts.append("720p")
+            if hasattr(self, "framerate_var"):
+                fps_v = self.framerate_var.get()
+                if fps_v and fps_v != "Original":
+                    s_parts.append(fps_v)
             if hasattr(self, "container_var"):
                 cnt_v = self.container_var.get()
                 if cnt_v and cnt_v != "Auto":
@@ -3034,7 +3050,7 @@ class EncoderApp:
         self.chroma_cb = ctk.CTkOptionMenu(r2, values=chroma_opts, variable=self.chroma_var, command=lambda v: self.mark_custom_settings(), height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"))
         self.chroma_cb.pack(side="left", fill="x", expand=True)
 
-        # Row 2.5: Resolution & Container Dropdowns
+        # Row 2.5: Resolution, Framerate & Container Dropdowns
         r_res = ctk.CTkFrame(self.settings_body, fg_color="transparent")
         r_res.pack(fill="x", padx=14, pady=3)
         ctk.CTkLabel(r_res, text="Resolution", width=65, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
@@ -3042,12 +3058,22 @@ class EncoderApp:
         self.resolution_cb = ctk.CTkOptionMenu(
             r_res, values=["Original", "4K UHD (2160p)", "1080p (Full HD)", "720p (HD)"],
             variable=self.resolution_var, command=lambda v: self.mark_custom_settings(),
-            width=175, height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
+            width=145, height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
             font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")
         )
         self.resolution_cb.pack(side="left", padx=(0, 10))
 
-        ctk.CTkLabel(r_res, text="Container", width=68, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
+        ctk.CTkLabel(r_res, text="Framerate", width=62, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
+        self.framerate_var = ctk.StringVar(value="Original")
+        self.framerate_cb = ctk.CTkOptionMenu(
+            r_res, values=["Original", "60 fps", "50 fps", "30 fps", "25 fps", "24 fps"],
+            variable=self.framerate_var, command=lambda v: self.mark_custom_settings(),
+            width=110, height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
+            font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")
+        )
+        self.framerate_cb.pack(side="left", padx=(0, 10))
+
+        ctk.CTkLabel(r_res, text="Container", width=62, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
         self.container_var = ctk.StringVar(value="Auto")
         self.container_cb = ctk.CTkOptionMenu(
             r_res, values=["Auto", "MP4", "MOV"],
@@ -4323,6 +4349,7 @@ class EncoderApp:
                     "encoder": settings["encoder"],
                     "chroma": settings["chroma"],
                     "resolution": settings.get("resolution", "Original"),
+                    "framerate": settings.get("framerate", "Original"),
                     "container": settings.get("container", "Auto"),
                     "quality": str(int(round(float(settings["quality"])))),
                     "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
@@ -4657,6 +4684,9 @@ class EncoderApp:
             res_setting = p.get("resolution", "Original")
             if hasattr(self, "resolution_var"):
                 self.resolution_var.set(res_setting if res_setting in self.resolution_cb.cget("values") else "Original")
+            fps_setting = p.get("framerate", "Original")
+            if hasattr(self, "framerate_var"):
+                self.framerate_var.set(fps_setting if fps_setting in self.framerate_cb.cget("values") else "Original")
             self.sync_encoder_ui()
             try: q_val = int(float(p.get("quality", 69)))
             except ValueError: q_val = 69
@@ -4844,6 +4874,7 @@ class EncoderApp:
             "encoder": self.encoder_var.get(),
             "chroma": self.chroma_var.get(),
             "resolution": self.resolution_var.get() if hasattr(self, "resolution_var") else "Original",
+            "framerate": self.framerate_var.get() if hasattr(self, "framerate_var") else "Original",
             "denoise": denoise_val,
             "quality": q_val,
             "quality_encoder": self.encoder_var.get(),
@@ -5247,6 +5278,9 @@ class EncoderApp:
                 if "resolution" in st and hasattr(self, "resolution_var"):
                     r_v = st.get("resolution", "Original")
                     self.resolution_var.set(r_v if r_v in self.resolution_cb.cget("values") else "Original")
+                if "framerate" in st and hasattr(self, "framerate_var"):
+                    f_v = st.get("framerate", "Original")
+                    self.framerate_var.set(f_v if f_v in self.framerate_cb.cget("values") else "Original")
                 if "container" in st and hasattr(self, "container_var"):
                     c_v = st.get("container", "Auto")
                     self.container_var.set(c_v if c_v in self.container_cb.cget("values") else "Auto")
@@ -5842,6 +5876,7 @@ class EncoderApp:
             encoder_choice = settings.get("encoder", "AppleMediaEngine")
             chroma_choice = settings.get("chroma", "10-Bit 4:2:2")
             res_choice = settings.get("resolution", "Original")
+            fps_choice = settings.get("framerate", "Original")
             denoise_raw = float(settings.get("denoise", 10))
             denoise_val = int(round(denoise_raw * 1000)) if 0.0 < denoise_raw < 1.0 else int(round(denoise_raw))
             q_val = settings.get("quality", 69)
@@ -6016,11 +6051,57 @@ class EncoderApp:
                         if nb_f > 0: v_stream_dur = nb_f / float(fps)
                     except Exception: pass
 
-            is_vfr_or_low = (fps < 23.976) or (v_s0_probe and "vfr" in get_frame_rate_mode(v_s0_probe).lower())
-            if is_vfr_or_low and has_vid:
-                target_fps = 29.97 if (fps < 23.976 or abs(fps - 30.0) < 0.5) else fps
+            # Framerate conforming & target FPS logic
+            orig_fps = fps
+            is_vfr = bool(v_s0_probe and "vfr" in get_frame_rate_mode(v_s0_probe).lower())
+            is_low = (fps < 23.976)
+            is_vfr_or_low = is_vfr or is_low
+
+            # Precise NTSC rate matching (0.03 tolerance cleanly isolates 59.94 from 60.00)
+            is_ntsc_2997 = abs(fps - 29.97) < 0.03 or abs(fps - (30000.0 / 1001.0)) < 0.01
+            is_ntsc_5994 = abs(fps - 59.94) < 0.03 or abs(fps - (60000.0 / 1001.0)) < 0.01
+            is_ntsc_2398 = abs(fps - 23.976) < 0.03 or abs(fps - (24000.0 / 1001.0)) < 0.01
+
+            chosen_fps_val = None
+            if fps_choice and fps_choice != "Original":
+                try: chosen_fps_val = float(fps_choice.replace("fps", "").strip())
+                except ValueError: chosen_fps_val = None
+
+            target_fps = None
+            if chosen_fps_val:
+                if abs(chosen_fps_val - 30.0) < 0.1:
+                    # Target 30 fps: only downsample videos 30 or over, never turn 29.97 into 30.0
+                    if is_ntsc_2997:
+                        # Video is already 29.97: keep 29.97 (conform to CFR if VFR)
+                        if is_vfr:
+                            target_fps = 29.97
+                    elif fps >= 29.98:
+                        if is_ntsc_5994:
+                            target_fps = 29.97
+                        else:
+                            target_fps = 30.0
+                    elif is_vfr or is_low:
+                        target_fps = 29.97 if (is_low or is_ntsc_2398) else (30.0 if is_vfr else fps)
+                elif chosen_fps_val < fps:
+                    # Generic downsampling (e.g. 60 -> 24, 60 -> 25)
+                    if abs(chosen_fps_val - 24.0) < 0.1 and (is_ntsc_5994 or is_ntsc_2997 or is_ntsc_2398):
+                        target_fps = 23.976
+                    elif abs(chosen_fps_val - 60.0) < 0.1 and is_ntsc_5994:
+                        target_fps = 59.94
+                    else:
+                        target_fps = chosen_fps_val
+                elif is_vfr or is_low:
+                    target_fps = 29.97 if (is_low or is_ntsc_2997) else 30.0
+            elif is_vfr or is_low:
+                # "Original" framerate: conform VFR or very low framerate to CFR for FCP compatibility
+                target_fps = 29.97 if (is_low or is_ntsc_2997) else (30.0 if (is_vfr and abs(fps - 30.0) < 1.0) else fps)
+
+            if target_fps and has_vid and (abs(target_fps - fps) > 0.005 or is_vfr or is_low):
                 vf_filters.append(f"fps=fps={target_fps}:round=near")
-                self.append_log(f"ℹ️ [CFR CONFORM] Low/Variable framerate ({fps:.2f} fps) detected. Conformed to {target_fps:.2f} fps CFR for FCP compatibility.\n")
+                if is_vfr or is_low:
+                    self.append_log(f"ℹ️ [CFR CONFORM] Variable/Low framerate ({fps:.2f} fps) conformed to {target_fps:.2f} fps CFR for FCP compatibility.\n")
+                else:
+                    self.append_log(f"ℹ️ [FRAMERATE] Converted framerate from {fps:.2f} fps to {target_fps:.2f} fps.\n")
                 fps = target_fps
 
             if has_vid and v_stream_dur > 0 and duration > (v_stream_dur + 0.08):
@@ -6103,7 +6184,7 @@ class EncoderApp:
             self.append_log(
                 f"\n▶ [START] {display_name}\n"
                 f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info}{scale_log} • Audio: {audio_tag_str} • Denoise: {denoise_desc}\n"
-                f"  • Source:   {width}x{height} ({res_lbl}) @ {fps:.2f} fps • {format_time_duration(duration, duration >= 3600)}\n"
+                f"  • Source:   {width}x{height} ({res_lbl}) @ {orig_fps:.2f} fps • {format_time_duration(duration, duration >= 3600)}\n"
                 f"  • Output:   {out_file}\n"
             )
 
@@ -6651,6 +6732,13 @@ codesign --force --deep --sign - "$APP_PATH"
 # 10. Create Standalone .DMG Installer
 echo "📦 Creating Drag & Drop .dmg distribution file..."
 DMG_PATH="$HOME/Desktop/MediaEngine.dmg"
+
+# Unmount any existing MediaEngine volumes to prevent 'Resource busy'
+hdiutil detach /Volumes/"MediaEngine"* -force >/dev/null 2>&1 || true
+hdiutil info 2>/dev/null | grep -E '/Volumes/MediaEngine' | awk '{print $1}' | while read -r dev; do
+    hdiutil detach "$dev" -force >/dev/null 2>&1 || true
+done
+
 rm -f "$DMG_PATH"
 
 DMG_TMP="/tmp/dmg_staging"
