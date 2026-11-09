@@ -6223,7 +6223,7 @@ class EncoderApp:
                 "-i", f
             ] + v_map_args + [
                 "-map", "-0:d?", "-map", "-0:t?",
-                "-map_metadata", "0", "-ignore_unknown", "-avoid_negative_ts", "auto",
+                "-map_metadata", "0:g", "-ignore_unknown", "-avoid_negative_ts", "auto",
                 "-threads", threads_per_proc
             ])
             cmd.extend(audio_args)
@@ -6250,7 +6250,7 @@ class EncoderApp:
 
                 v_tag = "avc1" if is_h264 else "hvc1"
                 tag_args = ["-tag:v", v_tag, "-vtag", v_tag] if has_alpha else ["-tag:v", v_tag]
-                movflags_str = "+faststart+use_metadata_tags" if has_alpha else "+faststart+use_metadata_tags+write_colr"
+                movflags_str = "+faststart+use_metadata_tags"
                 if is_videotoolbox:
                     cmd.extend(["-allow_sw", "1"])
                     if has_alpha:
@@ -6268,7 +6268,7 @@ class EncoderApp:
                     c_trc_val = c_trc_num
                     c_matrix_val = c_matrix_num
                     if is_h264:
-                        cmd.extend(["-crf", str(q_val), "-preset", speed_preset, "-g", str(gop_size), "-keyint_min", str(min_keyint), "-tag:v", v_tag, "-movflags", "+faststart+use_metadata_tags+write_colr", "-strict", "experimental"])
+                        cmd.extend(["-crf", str(q_val), "-preset", speed_preset, "-g", str(gop_size), "-keyint_min", str(min_keyint), "-tag:v", v_tag, "-movflags", "+faststart+use_metadata_tags", "-strict", "experimental"])
                     else:
                         x265_opts_list = ["sao=0", "aq-mode=3", "aq-strength=0.8", "rc-lookahead=25", "deblock=-1,-1", "psy-rd=1.5", "psy-rdoq=1.0", f"keyint={gop_size}", f"min-keyint={min_keyint}", f"range={range_x265}", "repeat-headers=1"]
                         x265_opts_list.append(f"pools={threads_per_proc}")
@@ -6279,7 +6279,7 @@ class EncoderApp:
                         if is_pq: x265_opts_list.extend(["hdr10-opt=1", "hdr10=1"])
                         if master_display_str: x265_opts_list.append(f"master-display={master_display_str}")
                         if cll_str: x265_opts_list.append(f"max-cll={cll_str}")
-                        cmd.extend(["-crf", str(q_val), "-preset", speed_preset, "-g", str(gop_size), "-keyint_min", str(min_keyint), "-x265-params", ":".join(x265_opts_list), "-tag:v", v_tag, "-movflags", "+faststart+use_metadata_tags+write_colr", "-strict", "experimental"])
+                        cmd.extend(["-crf", str(q_val), "-preset", speed_preset, "-g", str(gop_size), "-keyint_min", str(min_keyint), "-x265-params", ":".join(x265_opts_list), "-tag:v", v_tag, "-movflags", "+faststart+use_metadata_tags", "-strict", "experimental"])
             else:
                 cmd.extend(["-movflags", "+faststart+use_metadata_tags"])
 
@@ -6461,6 +6461,17 @@ class EncoderApp:
                 is_cancelled = (self.cancel_requested or item_id in self.cancelled_ids)
 
                 if exit_code != 0 and not is_cancelled and attempt < 3:
+                    if any(k in stderr_dump.lower() for k in ("error writing trailer", "shifting data", "udta", "unable to re-open")):
+                        self.append_log(f"⚠️ [RETRY {attempt + 1}/3] Container trailer finalization failed for {display_name}. Retrying with direct container writing...\n")
+                        if out_file and os.path.exists(out_file):
+                            try: os.remove(out_file)
+                            except OSError: pass
+                        for idx, arg in enumerate(cmd):
+                            if arg == "-movflags":
+                                cmd[idx + 1] = "+use_metadata_tags"
+                            elif arg == "-map_metadata":
+                                cmd[idx + 1] = "-1"
+                        continue
                     if "-timecode" in cmd and any(k in stderr_dump.lower() for k in ("timecode", "drop frame", "tmcd")):
                         self.append_log(f"⚠️ [WARNING] Timecode rejected for {display_name}. Retrying without timecode...\n")
                         if out_file and os.path.exists(out_file):
