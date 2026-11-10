@@ -552,7 +552,6 @@ def get_default_presets():
             "chroma": chroma,
             "resolution": "Original",
             "framerate": "Original",
-            "gamma": "Rec.709 (1-1-1)",
             "container": "Auto",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
@@ -565,7 +564,6 @@ def get_default_presets():
             "chroma": "10-Bit 4:2:0",
             "resolution": "Original",
             "framerate": "Original",
-            "gamma": "Rec.709 (1-1-1)",
             "container": "Auto",
             "quality": "58",
             "quality_encoder": "AppleMediaEngine",
@@ -578,7 +576,6 @@ def get_default_presets():
             "chroma": "10-Bit 4:2:0",
             "resolution": "Original",
             "framerate": "30 fps",
-            "gamma": "Rec.709 (1-1-1)",
             "container": "Auto",
             "quality": "52",
             "quality_encoder": "AppleMediaEngine",
@@ -591,7 +588,6 @@ def get_default_presets():
             "chroma": "8-Bit 4:2:0",
             "resolution": "4K UHD (2160p)",
             "framerate": "Original",
-            "gamma": "QuickTime Match",
             "container": "MP4",
             "quality": "39",
             "quality_encoder": "CPU",
@@ -604,7 +600,6 @@ def get_default_presets():
             "chroma": "10-Bit 4:2:0",
             "resolution": "Original",
             "framerate": "Original",
-            "gamma": "QuickTime Match",
             "container": "MP4",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
@@ -617,7 +612,6 @@ def get_default_presets():
             "chroma": chroma,
             "resolution": "Original",
             "framerate": "Original",
-            "gamma": "QuickTime Match",
             "container": "Auto",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
@@ -3055,7 +3049,7 @@ class EncoderApp:
         self.chroma_cb = ctk.CTkOptionMenu(r2, values=chroma_opts, variable=self.chroma_var, command=lambda v: self.mark_custom_settings(), height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"))
         self.chroma_cb.pack(side="left", fill="x", expand=True)
 
-        # Row 2.5: Resolution, Framerate, Gamma & Container Dropdowns
+        # Row 2.5: Resolution, Framerate & Container Dropdowns
         r_res = ctk.CTkFrame(self.settings_body, fg_color="transparent")
         r_res.pack(fill="x", padx=14, pady=3)
         ctk.CTkLabel(r_res, text="Resolution", width=65, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
@@ -3063,30 +3057,20 @@ class EncoderApp:
         self.resolution_cb = ctk.CTkOptionMenu(
             r_res, values=["Original", "4K UHD (2160p)", "1080p (Full HD)", "720p (HD)"],
             variable=self.resolution_var, command=lambda v: self.mark_custom_settings(),
-            width=125, height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
+            width=135, height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
             font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")
         )
-        self.resolution_cb.pack(side="left", padx=(0, 8))
+        self.resolution_cb.pack(side="left", padx=(0, 10))
 
         ctk.CTkLabel(r_res, text="Framerate", width=60, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
         self.framerate_var = ctk.StringVar(value="Original")
         self.framerate_cb = ctk.CTkOptionMenu(
             r_res, values=["Original", "60 fps", "50 fps", "30 fps", "25 fps", "24 fps"],
             variable=self.framerate_var, command=lambda v: self.mark_custom_settings(),
-            width=95, height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
+            width=105, height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
             font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")
         )
-        self.framerate_cb.pack(side="left", padx=(0, 8))
-
-        ctk.CTkLabel(r_res, text="Gamma", width=46, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
-        self.gamma_var = ctk.StringVar(value="QuickTime Match")
-        self.gamma_cb = ctk.CTkOptionMenu(
-            r_res, values=["QuickTime Match", "Rec.709 (1-1-1)"],
-            variable=self.gamma_var, command=lambda v: self.mark_custom_settings(),
-            width=130, height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
-            font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")
-        )
-        self.gamma_cb.pack(side="left", padx=(0, 8))
+        self.framerate_cb.pack(side="left", padx=(0, 10))
 
         ctk.CTkLabel(r_res, text="Container", width=60, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
         self.container_var = ctk.StringVar(value="Auto")
@@ -4365,7 +4349,6 @@ class EncoderApp:
                     "chroma": settings["chroma"],
                     "resolution": settings.get("resolution", "Original"),
                     "framerate": settings.get("framerate", "Original"),
-                    "gamma": settings.get("gamma", "QuickTime Match"),
                     "container": settings.get("container", "Auto"),
                     "quality": str(int(round(float(settings["quality"])))),
                     "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
@@ -4407,7 +4390,6 @@ class EncoderApp:
             "chroma": settings["chroma"],
             "resolution": settings.get("resolution", "Original"),
             "framerate": settings.get("framerate", "Original"),
-            "gamma": settings.get("gamma", "QuickTime Match"),
             "container": settings.get("container", "Auto"),
             "quality": str(int(round(float(settings["quality"])))),
             "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
@@ -4705,9 +4687,6 @@ class EncoderApp:
             fps_setting = p.get("framerate", "Original")
             if hasattr(self, "framerate_var"):
                 self.framerate_var.set(fps_setting if fps_setting in self.framerate_cb.cget("values") else "Original")
-            gamma_setting = p.get("gamma", "QuickTime Match")
-            if hasattr(self, "gamma_var"):
-                self.gamma_var.set(gamma_setting if gamma_setting in self.gamma_cb.cget("values") else "QuickTime Match")
             self.sync_encoder_ui()
             try: q_val = int(float(p.get("quality", 69)))
             except ValueError: q_val = 69
@@ -4896,7 +4875,6 @@ class EncoderApp:
             "chroma": self.chroma_var.get(),
             "resolution": self.resolution_var.get() if hasattr(self, "resolution_var") else "Original",
             "framerate": self.framerate_var.get() if hasattr(self, "framerate_var") else "Original",
-            "gamma": self.gamma_var.get() if hasattr(self, "gamma_var") else "QuickTime Match",
             "denoise": denoise_val,
             "quality": q_val,
             "quality_encoder": self.encoder_var.get(),
@@ -5303,9 +5281,6 @@ class EncoderApp:
                 if "framerate" in st and hasattr(self, "framerate_var"):
                     f_v = st.get("framerate", "Original")
                     self.framerate_var.set(f_v if f_v in self.framerate_cb.cget("values") else "Original")
-                if "gamma" in st and hasattr(self, "gamma_var"):
-                    g_v = st.get("gamma", "QuickTime Match")
-                    self.gamma_var.set(g_v if g_v in self.gamma_cb.cget("values") else "QuickTime Match")
                 if "container" in st and hasattr(self, "container_var"):
                     c_v = st.get("container", "Auto")
                     self.container_var.set(c_v if c_v in self.container_cb.cget("values") else "Auto")
@@ -6038,6 +6013,8 @@ class EncoderApp:
             is_hlg = color_trc in ("arib-std-b67", "hlg", "arib_std_b67")
             is_bt2020 = color_prim in ("bt2020", "bt2020-10", "bt2020-12", "bt2020_10", "bt2020_12")
             wide_or_hdr = (is_pq or is_hlg) or is_bt2020 or bool(master_display_str or cll_str)
+            if not wide_or_hdr and settings.get("preset") != "Log Footage":
+                range_ff, range_x265 = ("tv", "limited")
 
             is_sd = (width < 1280 and height < 720 and width > 0 and height > 0)
             default_matrix = "smpte170m" if is_sd else "bt709"
@@ -6050,14 +6027,13 @@ class EncoderApp:
             ff_trc = FFMPEG_CANONICAL_TRC.get(str(color_trc).lower(), color_trc) if color_trc else ("smpte2084" if is_pq else ("arib-std-b67" if is_hlg else default_matrix))
             ff_space = FFMPEG_CANONICAL_SPACE.get(str(color_space).lower(), color_space) if color_space else ("bt2020nc" if wide_or_hdr else default_matrix)
 
-            gamma_setting = settings.get("gamma", "QuickTime Match")
             if not wide_or_hdr:
-                if "QuickTime" in gamma_setting or "sRGB" in gamma_setting or "13" in gamma_setting:
-                    ff_trc = "iec61966-2-1"
-                    c_trc_num = 13
-                elif "1-1-1" in gamma_setting or "709" in gamma_setting:
-                    ff_trc = "bt709"
-                    c_trc_num = 1
+                ff_prim = "bt709"
+                ff_trc = "bt709"
+                ff_space = "bt709"
+                c_prim_num = 1
+                c_trc_num = 1
+                c_matrix_num = 1
 
             range_num = 1 if range_ff == "full" else 0
 
@@ -6291,7 +6267,7 @@ class EncoderApp:
 
                 v_tag = "avc1" if is_h264 else "hvc1"
                 tag_args = ["-tag:v", v_tag, "-vtag", v_tag] if has_alpha else ["-tag:v", v_tag]
-                movflags_str = "+faststart+use_metadata_tags"
+                movflags_str = "+faststart+use_metadata_tags+write_colr"
                 if is_videotoolbox:
                     cmd.extend(["-allow_sw", "1"])
                     if has_alpha:
@@ -6309,7 +6285,8 @@ class EncoderApp:
                     c_trc_val = c_trc_num
                     c_matrix_val = c_matrix_num
                     if is_h264:
-                        cmd.extend(["-crf", str(q_val), "-preset", speed_preset, "-g", str(gop_size), "-keyint_min", str(min_keyint), "-tag:v", v_tag, "-movflags", "+faststart+use_metadata_tags", "-strict", "experimental"])
+                        x264_opts_list = [f"colorprim={ff_prim}", f"transfer={ff_trc}", f"colormatrix={ff_space}", f"range={range_ff}"]
+                        cmd.extend(["-crf", str(q_val), "-preset", speed_preset, "-g", str(gop_size), "-keyint_min", str(min_keyint), "-x264-params", ":".join(x264_opts_list), "-tag:v", v_tag, "-movflags", movflags_str, "-strict", "experimental"])
                     else:
                         x265_opts_list = ["sao=0", "aq-mode=3", "aq-strength=0.8", "rc-lookahead=25", "deblock=-1,-1", "psy-rd=1.5", "psy-rdoq=1.0", f"keyint={gop_size}", f"min-keyint={min_keyint}", f"range={range_x265}", "repeat-headers=1"]
                         x265_opts_list.append(f"pools={threads_per_proc}")
@@ -6320,7 +6297,7 @@ class EncoderApp:
                         if is_pq: x265_opts_list.extend(["hdr10-opt=1", "hdr10=1"])
                         if master_display_str: x265_opts_list.append(f"master-display={master_display_str}")
                         if cll_str: x265_opts_list.append(f"max-cll={cll_str}")
-                        cmd.extend(["-crf", str(q_val), "-preset", speed_preset, "-g", str(gop_size), "-keyint_min", str(min_keyint), "-x265-params", ":".join(x265_opts_list), "-tag:v", v_tag, "-movflags", "+faststart+use_metadata_tags", "-strict", "experimental"])
+                        cmd.extend(["-crf", str(q_val), "-preset", speed_preset, "-g", str(gop_size), "-keyint_min", str(min_keyint), "-x265-params", ":".join(x265_opts_list), "-tag:v", v_tag, "-movflags", movflags_str, "-strict", "experimental"])
             else:
                 cmd.extend(["-movflags", "+faststart+use_metadata_tags"])
 
