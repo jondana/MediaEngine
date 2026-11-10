@@ -556,7 +556,6 @@ def get_default_presets():
             "container": "Auto",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
-            "denoise": "10",
             "audio": "Auto"
         },
         "Non-Log Footage": {
@@ -568,7 +567,6 @@ def get_default_presets():
             "container": "Auto",
             "quality": "58",
             "quality_encoder": "AppleMediaEngine",
-            "denoise": "12",
             "audio": "AAC"
         },
         "Screen Recordings": {
@@ -580,7 +578,6 @@ def get_default_presets():
             "container": "Auto",
             "quality": "52",
             "quality_encoder": "AppleMediaEngine",
-            "denoise": "0",
             "audio": "AAC"
         },
         "H.264 MP4": {
@@ -590,9 +587,8 @@ def get_default_presets():
             "resolution": "4K UHD (2160p)",
             "framerate": "Original",
             "container": "MP4",
-            "quality": "39",
+            "quality": "18",
             "quality_encoder": "CPU",
-            "denoise": "0",
             "audio": "AAC"
         },
         "H.265 MP4 10-Bit": {
@@ -604,7 +600,6 @@ def get_default_presets():
             "container": "MP4",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
-            "denoise": "0",
             "audio": "AAC"
         },
         "Custom": {
@@ -616,7 +611,6 @@ def get_default_presets():
             "container": "Auto",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
-            "denoise": "10",
             "audio": "Auto"
         }
     }
@@ -672,6 +666,20 @@ FFMPEG_CANONICAL_SPACE = {
     "chroma-derived-c": "chroma-derived-c", "ictcp": "ictcp"
 }
 
+def vt_to_crf(vt_q):
+    try: v = float(vt_q)
+    except Exception: v = 69.0
+    if v >= 100: return 0
+    elif v >= 70: return int(round(18.0 * (100.0 - v) / 30.0))
+    else: return min(51, int(round(18.0 + (70.0 - v) * (33.0 / 69.0))))
+
+def crf_to_vt(crf_val):
+    try: c = float(crf_val)
+    except Exception: c = 18.0
+    if c <= 0: return 100
+    elif c <= 18: return int(round(100.0 - (c / 18.0) * 30.0))
+    else: return max(1, int(round(70.0 - ((c - 18.0) / 33.0) * 69.0)))
+
 def get_quality_description(val, encoder):
     try:
         q = int(round(float(val)))
@@ -679,57 +687,21 @@ def get_quality_description(val, encoder):
         q = 69
     is_vt = (encoder == "AppleMediaEngine")
     if is_vt:
-        if q >= 90:
-            return f"{q} (Extreme / Near Lossless)"
-        elif q >= 75:
-            return f"{q} (Very High Quality)"
-        elif q >= 65:
-            return f"{q} (Sweet Spot - Master)"
-        elif q >= 55:
-            return f"{q} (Sweet Spot - Balanced)"
-        elif q >= 45:
-            return f"{q} (Medium / Compact)"
-        elif q >= 30:
-            return f"{q} (Low / Heavy Compression)"
-        else:
-            return f"{q} (Very Low / Draft)"
+        if q >= 90: return f"{q} (Lossless)"
+        elif q >= 75: return f"{q} (Master)"
+        elif q >= 65: return f"{q} (High)"
+        elif q >= 55: return f"{q} (Balanced)"
+        elif q >= 40: return f"{q} (Medium)"
+        elif q >= 25: return f"{q} (Low)"
+        else: return f"{q} (Draft)"
     else:
-        crf = max(0, min(51, 51 - q))
-        if crf == 0:
-            return f"{q} (CRF 0 • Lossless)"
-        elif crf <= 13:
-            return f"{q} (CRF {crf} • Extreme / Near Lossless)"
-        elif crf <= 17:
-            return f"{q} (CRF {crf} • High / Visually Lossless)"
-        elif crf <= 23:
-            return f"{q} (CRF {crf} • Sweet Spot - Balanced)"
-        elif crf <= 28:
-            return f"{q} (CRF {crf} • Medium / Compact)"
-        elif crf <= 35:
-            return f"{q} (CRF {crf} • Low / Heavy Compression)"
-        else:
-            return f"{q} (CRF {crf} • Very Low / Draft)"
-
-def get_denoise_description(val):
-    try:
-        v = float(val)
-        val_int = int(round(v * 1000)) if 0.0 < v < 1.0 else int(round(v))
-    except Exception:
-        val_int = 0
-    if val_int <= 0:
-        return "0 (Off • Max Speed)"
-    elif val_int <= 5:
-        return f"{val_int} (Ultra-Fine • CPU)"
-    elif val_int <= 12:
-        return f"{val_int} (Subtle • CPU)"
-    elif val_int <= 22:
-        return f"{val_int} (Moderate • CPU)"
-    elif val_int <= 38:
-        return f"{val_int} (Medium • CPU)"
-    elif val_int <= 50:
-        return f"{val_int} (Strong • CPU)"
-    else:
-        return f"{val_int} (Heavy • CPU)"
+        if q == 0: return f"CRF {q} (Lossless)"
+        elif q <= 14: return f"CRF {q} (Master)"
+        elif q <= 18: return f"CRF {q} (High)"
+        elif q <= 23: return f"CRF {q} (Balanced)"
+        elif q <= 29: return f"CRF {q} (Medium)"
+        elif q <= 36: return f"CRF {q} (Low)"
+        else: return f"CRF {q} (Draft)"
 
 def get_hardware_media_profile():
     brand = ""
@@ -865,21 +837,13 @@ def get_settings_filename_tag(settings):
             q_int = int(q)
             q_enc = settings.get("quality_encoder", enc)
             if enc == "AppleMediaEngine":
-                vt_q = max(1, min(100, int(round((q_int / 51.0) * 100)))) if q_enc == "CPU" and q_int <= 51 else q_int
+                vt_q = crf_to_vt(q_int) if q_enc == "CPU" else q_int
                 parts.append(f"Q{vt_q}")
             else:
-                cpu_q = int(round((q_int / 100.0) * 51)) if (q_enc == "AppleMediaEngine" or q_int > 51) else q_int
-                crf_val = max(0, min(51, 51 - cpu_q))
+                crf_val = vt_to_crf(q_int) if q_enc == "AppleMediaEngine" else q_int
                 parts.append(f"CRF{crf_val}")
         except Exception:
             pass
-    try:
-        d_raw = float(settings.get("denoise", 0) or 0)
-        d_int = int(round(d_raw * 1000)) if 0.0 < d_raw < 1.0 else int(round(d_raw))
-    except Exception:
-        d_int = 0
-    if d_int > 0:
-        parts.append(f"DN{d_int}")
     return " ".join(parts)
 
 RESERVED_OUTPUT_PATHS = set()
@@ -2003,21 +1967,13 @@ class QuartzQueueCanvas(tk.Canvas):
                     q_int = int(q)
                     q_enc = st.get("quality_encoder", enc)
                     if enc == "AppleMediaEngine":
-                        vt_q = max(1, min(100, int(round((q_int / 51.0) * 100)))) if q_enc == "CPU" and q_int <= 51 else q_int
+                        vt_q = crf_to_vt(q_int) if q_enc == "CPU" else q_int
                         s_parts.append(f"Q{vt_q}")
                     else:
-                        cpu_q = int(round((q_int / 100.0) * 51)) if (q_enc == "AppleMediaEngine" or q_int > 51) else q_int
-                        crf_disp = max(0, min(51, 51 - cpu_q))
+                        crf_disp = vt_to_crf(q_int) if q_enc == "AppleMediaEngine" else q_int
                         s_parts.append(f"CRF {crf_disp}")
                 except Exception:
                     pass
-            try:
-                d_raw = float(st.get("denoise", 0) or 0)
-                d_int = int(round(d_raw * 1000)) if 0.0 < d_raw < 1.0 else int(round(d_raw))
-            except Exception:
-                d_int = 0
-            if d_int > 0:
-                s_parts.append(f"DN {d_int}")
         settings_str = " • ".join(s_parts)
 
         done_str = item.get("done_stats", "") if status == "completed" else ""
@@ -2308,7 +2264,7 @@ class EncoderApp:
         self.cancel_requested = False
         self.active_scans = 0
         self.last_vt_quality = 69
-        self.last_cpu_crf = 33
+        self.last_cpu_crf = 18
         self._dispatcher_crash_count = 0
         self.batch_cur_pct = 0.0
         self.batch_target_pct = 0.0
@@ -2576,8 +2532,6 @@ class EncoderApp:
             self.batch_progress_bar.configure(progress_color=ULTRA_TEXT)
         if hasattr(self, "quality_slider"):
             self.quality_slider.configure(progress_color=ULTRA_BG, button_color=ULTRA_TEXT, button_hover_color=ULTRA_TEXT_HOVER)
-        if hasattr(self, "denoise_slider"):
-            self.denoise_slider.configure(progress_color=ULTRA_BG, button_color=ULTRA_TEXT, button_hover_color=ULTRA_TEXT_HOVER)
         self.update_concurrency_buttons_ui()
         if hasattr(self, "status_badge") and "ENCODING" in self.status_badge.cget("text"):
             self.status_badge.configure(text_color=ULTRA_TEXT, fg_color=ULTRA_BG)
@@ -2658,16 +2612,7 @@ class EncoderApp:
                     s_parts.append(cnt_v)
             if hasattr(self, "quality_slider"):
                 q = int(round(float(self.quality_slider.get())))
-                crf_disp = max(0, min(51, 51 - q)) if enc == "CPU" else q
-                s_parts.append(f"Q{q}" if enc == "AppleMediaEngine" else f"CRF {crf_disp}")
-            if hasattr(self, "denoise_slider"):
-                try:
-                    d_raw = float(self.denoise_slider.get())
-                    d_int = int(round(d_raw * 1000)) if 0.0 < d_raw < 1.0 else int(round(d_raw))
-                except Exception:
-                    d_int = 0
-                if d_int > 0:
-                    s_parts.append(f"DN {d_int}")
+                s_parts.append(f"Q{q}" if enc == "AppleMediaEngine" else f"CRF {q}")
             return " • ".join(s_parts)
         except Exception:
             return ""
@@ -3089,7 +3034,7 @@ class EncoderApp:
         self.lbl_quality_title = ctk.CTkLabel(r_quality, text="Quality", width=65, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"))
         self.lbl_quality_title.pack(side="left")
         self.lbl_quality_val = SplitValueLabel(r_quality, width=255)
-        self.lbl_quality_val.configure(text="69 (Sweet Spot - Master)")
+        self.lbl_quality_val.configure(text="69 (Master)")
         self.lbl_quality_val.pack(side="right")
         self.lbl_quality_val.bind("<Button-1>", lambda e: self.edit_quality_dialog())
         btn_q_minus = ctk.CTkButton(r_quality, text="−", width=22, height=22, corner_radius=6, fg_color="transparent", hover_color=ULTRA_BG, text_color=TEXT_PRIMARY, font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), command=lambda: self.step_quality(-1))
@@ -3101,24 +3046,7 @@ class EncoderApp:
         self.quality_slider.pack(side="left", fill="x", expand=True)
         self.quality_slider.bind("<ButtonRelease-1>", lambda e: self.mark_custom_settings())
 
-        # Row 4: Denoise
-        r_denoise = ctk.CTkFrame(self.settings_body, fg_color="transparent")
-        r_denoise.pack(fill="x", padx=14, pady=3)
-        ctk.CTkLabel(r_denoise, text="Denoise", width=65, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
-        self.lbl_denoise_val = SplitValueLabel(r_denoise, width=235)
-        self.lbl_denoise_val.configure(text="10 (Subtle • CPU)")
-        self.lbl_denoise_val.pack(side="right")
-        self.lbl_denoise_val.bind("<Button-1>", lambda e: self.edit_denoise_dialog())
-        btn_d_minus = ctk.CTkButton(r_denoise, text="−", width=22, height=22, corner_radius=6, fg_color="transparent", hover_color=ULTRA_BG, text_color=TEXT_PRIMARY, font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), command=lambda: self.step_denoise(-1))
-        btn_d_minus.pack(side="left", padx=(0, 4))
-        btn_d_plus = ctk.CTkButton(r_denoise, text="+", width=22, height=22, corner_radius=6, fg_color="transparent", hover_color=ULTRA_BG, text_color=TEXT_PRIMARY, font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), command=lambda: self.step_denoise(1))
-        btn_d_plus.pack(side="right", padx=(4, 10))
-        self.denoise_slider = ctk.CTkSlider(r_denoise, from_=0, to=30, number_of_steps=30, command=self.on_denoise_slider_change, height=18, fg_color="#222222", progress_color=ULTRA_BG, button_color=ULTRA_TEXT, button_hover_color=ULTRA_TEXT_HOVER)
-        self.denoise_slider.set(10)
-        self.denoise_slider.pack(side="left", fill="x", expand=True)
-        self.denoise_slider.bind("<ButtonRelease-1>", lambda e: self.mark_custom_settings())
-
-        for _sl in (self.quality_slider, self.denoise_slider):
+        for _sl in (self.quality_slider,):
             for _w in (_sl, getattr(_sl, "_canvas", None)):
                 if _w:
                     for _seq in ("<MouseWheel>", "<TouchpadScroll>", "<Button-4>", "<Button-5>"):
@@ -3506,20 +3434,11 @@ class EncoderApp:
             ("3. RECOMMENDED PRESETS & BEST SETTINGS",
              "If your Mac tier lacks hardware 10-Bit 4:2:2 encode support, MediaEngine safely falls back to 10-Bit 4:2:0 without crashing or dropping bit depth.",
              [
-                 ("Log Footage Preset", "HEVC • 10-Bit 4:2:2 • Quality: 69 • Denoise: 10"),
+                 ("Log Footage Preset", "HEVC • 10-Bit 4:2:2 • Quality: 69 (Master)"),
                  ("Why Q69 for Log?", "Preserves shadow latitude, fine grain structure, and subtle gradations without banding."),
-                 ("Non-Log Preset", "HEVC • 10-Bit 4:2:0 • Quality: 58 • Denoise: 12"),
+                 ("Non-Log Preset", "HEVC • 10-Bit 4:2:0 • Quality: 58 (Balanced)"),
                  ("Why Q58 for Rec.709?", "Optimal sweet spot for delivery, web, and archives with high compression and zero visible loss."),
-                 ("Software (CPU) Mode", "libx265 / libx264 with tuned psycho-visual RD, SAO disabled, and AQ mode 3 for deep control.")
-             ]),
-
-            ("4. PERCEPTUAL NOISE REDUCTION (ATADENOISE)",
-             "Denoise Settings Guide: 0 = Off (fastest), 5–10 = Subtle (clean cinema log), 15–22 = Moderate (high-ISO grain).",
-             [
-                 ("Chroma-Biased Filter", "Human vision notices luma edges far more than chroma noise; chroma grain is heavily attenuated."),
-                 ("Bitrate Conservation", "Strips high-frequency sensor noise from dark shadows, saving bitrate for visible detail."),
-                 ("Dynamic Temporal Window", "Averages across 5 to 9 successive frames depending on strength, avoiding motion ghosting."),
-                 ("HDR Safety Bypass", "Temporal denoising is automatically bypassed on HDR (PQ/HLG) to prevent highlight stepping.")
+                 ("Software (CPU) Mode", "Direct CRF slider with tuned psycho-visual RD, SAO disabled, and AQ mode 3 for deep control.")
              ]),
 
             ("5. TRANSPARENCY & ALPHA PRESERVATION",
@@ -4353,7 +4272,6 @@ class EncoderApp:
                     "container": settings.get("container", "Auto"),
                     "quality": str(int(round(float(settings["quality"])))),
                     "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
-                    "denoise": str(settings["denoise"]),
                     "audio": settings.get("audio", "Auto")
                 }
                 self.save_presets_to_disk()
@@ -4394,7 +4312,6 @@ class EncoderApp:
             "container": settings.get("container", "Auto"),
             "quality": str(int(round(float(settings["quality"])))),
             "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
-            "denoise": str(settings["denoise"]),
             "audio": settings.get("audio", "Auto")
         }
         self.save_presets_to_disk()
@@ -4578,12 +4495,6 @@ class EncoderApp:
         self.lbl_quality_val.configure(text=get_quality_description(val, self.encoder_var.get()))
         self.mark_custom_settings()
 
-    def step_denoise(self, delta):
-        val = max(0, min(30, int(round(self.denoise_slider.get())) + delta))
-        self.denoise_slider.set(val)
-        self.lbl_denoise_val.configure(text=get_denoise_description(val))
-        self.mark_custom_settings()
-
     def step_concurrency(self, delta):
         modes = ["Sequential", "Balanced", "Turbo"]
         cur = getattr(self, "concurrency_mode", "Balanced")
@@ -4603,24 +4514,11 @@ class EncoderApp:
                 if is_vt:
                     val_int = max(1, min(100, int(val_str.strip())))
                     self.last_vt_quality = val_int
-                    slider_val = val_int
                 else:
-                    crf_in = max(0, min(51, int(val_str.strip())))
-                    slider_val = 51 - crf_in
-                    self.last_cpu_crf = slider_val
-                self.quality_slider.set(slider_val)
-                self.lbl_quality_val.configure(text=get_quality_description(slider_val, self.encoder_var.get()))
-                self.mark_custom_settings()
-            except ValueError: pass
-
-    def edit_denoise_dialog(self):
-        dialog = ctk.CTkInputDialog(text="Enter Denoise strength (0 - 30):", title="Set Denoise")
-        val_str = dialog.get_input()
-        if val_str and val_str.strip():
-            try:
-                val_int = max(0, min(30, int(val_str.strip())))
-                self.denoise_slider.set(val_int)
-                self.lbl_denoise_val.configure(text=get_denoise_description(val_int))
+                    val_int = max(0, min(51, int(val_str.strip())))
+                    self.last_cpu_crf = val_int
+                self.quality_slider.set(val_int)
+                self.lbl_quality_val.configure(text=get_quality_description(val_int, self.encoder_var.get()))
                 self.mark_custom_settings()
             except ValueError: pass
 
@@ -4630,10 +4528,6 @@ class EncoderApp:
         idx = modes.index(cur) if cur in modes else 1
         new_idx = (idx + 1) % len(modes)
         self.set_concurrency_mode(modes[new_idx])
-
-    def on_denoise_slider_change(self, value):
-        val = int(round(float(value)))
-        self.lbl_denoise_val.configure(text=get_denoise_description(val))
 
     def on_quality_slider_change(self, value):
         val = int(round(float(value)))
@@ -4688,32 +4582,31 @@ class EncoderApp:
             fps_setting = p.get("framerate", "Original")
             if hasattr(self, "framerate_var"):
                 self.framerate_var.set(fps_setting if fps_setting in self.framerate_cb.cget("values") else "Original")
-            self.sync_encoder_ui()
             try: q_val = int(float(p.get("quality", 69)))
             except ValueError: q_val = 69
             q_enc = p.get("quality_encoder", p.get("encoder", "AppleMediaEngine"))
             if self.encoder_var.get() == "AppleMediaEngine":
-                if q_enc == "CPU" and q_val <= 51:
-                    q_val = max(1, min(100, int(round((q_val / 51.0) * 100))))
-                self.last_vt_quality = q_val
+                if q_enc == "CPU":
+                    q_val = crf_to_vt(q_val)
+                self.last_vt_quality = max(1, min(100, q_val))
             else:
-                if q_enc == "AppleMediaEngine" or q_val > 51:
-                    q_val = max(0, min(51, int(round((q_val / 100.0) * 51))))
-                self.last_cpu_crf = q_val
-            self.quality_slider.set(q_val)
-            self.lbl_quality_val.configure(text=get_quality_description(q_val, self.encoder_var.get()))
-            try:
-                d_raw = float(p.get("denoise", 0))
-                d_val = int(round(d_raw * 1000)) if 0.0 < d_raw < 1.0 else int(round(d_raw))
-            except ValueError: d_val = 0
-            self.denoise_slider.set(d_val)
-            self.lbl_denoise_val.configure(text=get_denoise_description(d_val))
+                if q_enc == "AppleMediaEngine":
+                    q_val = vt_to_crf(q_val)
+                self.last_cpu_crf = max(0, min(51, q_val))
+            self.sync_encoder_ui()
             self._preset_loading = False
             self.update_settings_summary()
             self.apply_settings_to_selected()
 
     def on_encoder_menu_change(self, choice=None):
-        self.current_encoder = self.encoder_var.get()
+        new_enc = self.encoder_var.get()
+        if new_enc != self.current_encoder:
+            cur_val = int(round(self.quality_slider.get()))
+            if new_enc == "AppleMediaEngine":
+                self.last_vt_quality = crf_to_vt(cur_val)
+            else:
+                self.last_cpu_crf = vt_to_crf(cur_val)
+            self.current_encoder = new_enc
         self.sync_encoder_ui()
         self.mark_custom_settings()
 
@@ -4855,12 +4748,8 @@ class EncoderApp:
             self._on_dest_changed()
 
     def get_current_settings(self):
-        try:
-            denoise_val = int(round(float(self.denoise_slider.get())))
-        except Exception: denoise_val = 0
-
         try: q_val = int(round(float(self.quality_slider.get())))
-        except Exception: q_val = 69 if self.encoder_var.get() == "AppleMediaEngine" else 33
+        except Exception: q_val = 69 if self.encoder_var.get() == "AppleMediaEngine" else 18
 
         dest_dir = self.dest_var.get().strip() or os.path.expanduser("~/Desktop")
         preset_name = self.preset_var.get() if hasattr(self, "preset_var") else "Log Footage"
@@ -4876,7 +4765,6 @@ class EncoderApp:
             "chroma": self.chroma_var.get(),
             "resolution": self.resolution_var.get() if hasattr(self, "resolution_var") else "Original",
             "framerate": self.framerate_var.get() if hasattr(self, "framerate_var") else "Original",
-            "denoise": denoise_val,
             "quality": q_val,
             "quality_encoder": self.encoder_var.get(),
             "speed": "fast",
@@ -5289,20 +5177,17 @@ class EncoderApp:
                 q_val = int(st.get("quality", 69))
                 q_enc = st.get("quality_encoder", e_val)
                 if e_val == "AppleMediaEngine":
-                    if q_enc == "CPU" and q_val <= 51:
-                        q_val = max(1, min(100, int(round((q_val / 51.0) * 100))))
-                    self.last_vt_quality = q_val
+                    if q_enc == "CPU":
+                        q_val = crf_to_vt(q_val)
+                    self.last_vt_quality = max(1, min(100, q_val))
+                    self.quality_slider.set(self.last_vt_quality)
                 else:
-                    if q_enc == "AppleMediaEngine" or q_val > 51:
-                        q_val = max(0, min(51, int(round((q_val / 100.0) * 51))))
-                    self.last_cpu_crf = q_val
-                self.quality_slider.set(q_val)
-                self.lbl_quality_val.configure(text=get_quality_description(q_val, e_val))
-
-                d_raw = float(st.get("denoise", 10))
-                d_val = int(round(d_raw * 1000)) if 0.0 < d_raw < 1.0 else int(round(d_raw))
-                self.denoise_slider.set(d_val)
-                self.lbl_denoise_val.configure(text=get_denoise_description(d_val))
+                    if q_enc == "AppleMediaEngine":
+                        q_val = vt_to_crf(q_val)
+                    self.last_cpu_crf = max(0, min(51, q_val))
+                    self.quality_slider.set(self.last_cpu_crf)
+                val = int(round(self.quality_slider.get()))
+                self.lbl_quality_val.configure(text=get_quality_description(val, e_val))
 
                 if "dest_dir" in st and st["dest_dir"]:
                     self.dest_var.set(st["dest_dir"])
@@ -5878,12 +5763,8 @@ class EncoderApp:
             chroma_choice = settings.get("chroma", "10-Bit 4:2:2")
             res_choice = settings.get("resolution", "Original")
             fps_choice = settings.get("framerate", "Original")
-            denoise_raw = float(settings.get("denoise", 10))
-            denoise_val = int(round(denoise_raw * 1000)) if 0.0 < denoise_raw < 1.0 else int(round(denoise_raw))
             q_val = settings.get("quality", 69)
             speed_preset = settings.get("speed", "fast")
-
-            denoise_desc = get_denoise_description(denoise_val)
             is_videotoolbox = encoder_choice == "AppleMediaEngine"
 
             probe = self.get_probe_data(current_item)
@@ -5924,22 +5805,18 @@ class EncoderApp:
                 q_val = getattr(self, "last_vt_quality", 69)
 
             saved_enc = settings.get("quality_encoder", settings.get("encoder", "AppleMediaEngine"))
-            raw_q = int(settings.get("quality", 69 if is_videotoolbox else 33))
+            raw_q = int(settings.get("quality", 69 if is_videotoolbox else 18))
 
             if is_videotoolbox:
-                if saved_enc == "CPU" and raw_q <= 51:
-                    q_val = max(1, min(100, int(round((raw_q / 51.0) * 100))))
+                if saved_enc == "CPU":
+                    q_val = crf_to_vt(raw_q)
                 else:
-                    q_val = max(1, min(100, int(q_val)))
-            elif encoder_choice == "CPU":
-                if saved_enc == "AppleMediaEngine" or raw_q > 51:
-                    cpu_slider_val = int(round((raw_q / 100.0) * 51))
-                else:
-                    cpu_slider_val = raw_q
-                crf = max(0, min(51, 51 - cpu_slider_val))
-                q_val = crf
+                    q_val = max(1, min(100, int(raw_q)))
             else:
-                q_val = max(0, min(51, 51 - int(q_val)))
+                if saved_enc == "AppleMediaEngine":
+                    q_val = vt_to_crf(raw_q)
+                else:
+                    q_val = max(0, min(51, int(raw_q)))
 
             if is_videotoolbox:
                 if is_h264: codec_name, profile_str, pix_fmt_str = "h264_videotoolbox", "high", "nv12"
@@ -6126,10 +6003,7 @@ class EncoderApp:
                 vf_filters.append(f"tpad=stop_mode=clone:stop_duration={tail_pad:.3f}")
                 self.append_log(f"ℹ️ [AV-SYNC] Video stream ({v_stream_dur:.2f}s) is shorter than audio ({duration:.2f}s). Padded tail by {tail_pad:.2f}s with cloned frames.\n")
 
-            denoise_log_info = denoise_desc
             if has_alpha:
-                if denoise_val > 0:
-                    denoise_desc = "Skipped (Alpha Channel)"
                 fmt_tags = {str(k).lower(): str(v).lower() for k, v in probe.get("format", {}).get("tags", {}).items()}
                 v_s0 = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), {})
                 v_tags = {str(k).lower(): str(v).lower() for k, v in v_s0.get("tags", {}).items()}
@@ -6151,35 +6025,6 @@ class EncoderApp:
                 else:
                     self.append_log(f"ℹ️ [INFO] Input '{display_name}' has premultiplied alpha (alpha_mode: {alpha_mode_raw}). Omitting premultiply filter.\n")
                 vf_filters.append(f"format={pix_fmt_str}")
-            elif denoise_val > 0 and (is_pq or is_hlg):
-                hdr_type = "PQ" if is_pq else "HLG"
-                denoise_desc = f"Skipped (HDR {hdr_type})"
-                self.append_log(f"⚠️ [NOTICE] Denoising skipped for '{display_name}'. Temporal filtering in non-linear HDR ({hdr_type}) code space causes shadow crushing and highlight artifacts.\n")
-                sp_parts = [f"range={range_ff}"]
-                if ff_prim: sp_parts.append(f"color_primaries={ff_prim}")
-                if ff_trc: sp_parts.append(f"color_trc={ff_trc}")
-                if ff_space: sp_parts.append(f"colorspace={ff_space}")
-                vf_filters.append(f"setparams={':'.join(sp_parts)}")
-            elif denoise_val > 0:
-                denoise_f = denoise_val / 1000.0
-                th_y_a = min(0.30, max(0.005, round(denoise_f * 1.2, 4)))
-                th_y_b = min(0.30, max(0.012, round(denoise_f * 3.5, 4)))
-                th_c_a = min(0.30, max(0.010, round(denoise_f * 2.0, 4)))
-                th_c_b = min(0.30, max(0.024, round(denoise_f * 5.5, 4)))
-                s_frames = 9 if denoise_val >= 25 else (7 if denoise_val >= 15 else 5)
-                planar_fmt = "yuv422p10le" if ("4:2:2" in chroma_choice and "10-Bit" in chroma_choice) else ("yuv420p10le" if "10-Bit" in chroma_choice else "yuv420p")
-
-                vf_filters.extend([
-                    f"format={planar_fmt}",
-                    f"atadenoise=0a={th_y_a:.4f}:0b={th_y_b:.4f}:1a={th_c_a:.4f}:1b={th_c_b:.4f}:2a={th_c_a:.4f}:2b={th_c_b:.4f}:s={s_frames}:a=p",
-                    f"format={pix_fmt_str}"
-                ])
-                sp_parts = [f"range={range_ff}"]
-                if ff_prim: sp_parts.append(f"color_primaries={ff_prim}")
-                if ff_trc: sp_parts.append(f"color_trc={ff_trc}")
-                if ff_space: sp_parts.append(f"colorspace={ff_space}")
-                vf_filters.append(f"setparams={':'.join(sp_parts)}")
-                denoise_log_info = f"{denoise_desc} [{s_frames}f]"
             else:
                 sp_parts = [f"range={range_ff}"]
                 if ff_prim: sp_parts.append(f"color_primaries={ff_prim}")
@@ -6200,7 +6045,7 @@ class EncoderApp:
             scale_log = f" • Scale: {target_w}x{target_h} [Lanczos]" if (target_w and target_h and target_w != width) else ""
             self.append_log(
                 f"\n▶ [START] {display_name}\n"
-                f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info}{scale_log} • Audio: {audio_tag_str} • Denoise: {denoise_desc}\n"
+                f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info}{scale_log} • Audio: {audio_tag_str}\n"
                 f"  • Source:   {width}x{height} ({res_lbl}) @ {orig_fps:.2f} fps • {format_time_duration(duration, duration >= 3600)}\n"
                 f"  • Output:   {out_file}\n"
             )
@@ -6389,8 +6234,7 @@ class EncoderApp:
                         if is_held:
                             last_heartbeat[0] = time.time()
                             continue
-                        has_sw_filters = (denoise_val > 0 or any('atadenoise' in str(vf) for vf in vf_filters))
-                        watchdog_timeout = (120.0 if has_sw_filters else 90.0) if first_frame_seen[0] else 180.0
+                        watchdog_timeout = 90.0 if first_frame_seen[0] else 180.0
                         if (time.time() - last_heartbeat[0]) > watchdog_timeout:
                             self.append_log(f"\n⚠️ [WATCHDOG] VideoToolbox stalled on {display_name}. Terminating hung ffmpeg process...\n")
                             with self.process_lock: self._last_hw_release_time = time.time()
@@ -6762,9 +6606,14 @@ codesign --force --deep --sign - "$APP_PATH"
 echo "📦 Creating Drag & Drop .dmg distribution file..."
 DMG_PATH="$HOME/Desktop/MediaEngine.dmg"
 
-# Unmount any existing MediaEngine volumes to prevent 'Resource busy'
-hdiutil detach /Volumes/"MediaEngine"* -force >/dev/null 2>&1 || true
-hdiutil info 2>/dev/null | grep -E '/Volumes/MediaEngine' | awk '{print $1}' | while read -r dev; do
+# Force unmount any existing MediaEngine volumes and eject parent disk devices
+for mount in /Volumes/MediaEngine*; do
+    if [ -d "$mount" ]; then
+        diskutil unmountDisk force "$mount" >/dev/null 2>&1 || hdiutil detach "$mount" -force >/dev/null 2>&1 || true
+    fi
+done
+
+hdiutil info 2>/dev/null | grep -B 5 "MediaEngine" | grep -E '^/dev/disk[0-9]+' | awk '{print $1}' | while read -r dev; do
     hdiutil detach "$dev" -force >/dev/null 2>&1 || true
 done
 
@@ -6809,7 +6658,25 @@ the quarantine tag so macOS treats it as a trusted local app.
 ======================================================================
 READMEEOF
 
-hdiutil create -volname "MediaEngine" -srcfolder "$DMG_TMP" -ov -format UDZO "$DMG_PATH"
+# Prevent Spotlight from scanning and locking staging volume during creation
+touch "$DMG_TMP/.metadata_never_index" 2>/dev/null || true
+
+# Robust creation loop with -fs HFS+ to bypass APFS XProtect lock contention
+DMG_DONE=0
+for i in 1 2 3; do
+    rm -f "$DMG_PATH"
+    if hdiutil create -volname "MediaEngine" -srcfolder "$DMG_TMP" -ov -format UDZO -fs HFS+ "$DMG_PATH" >/dev/null 2>&1; then
+        DMG_DONE=1
+        break
+    else
+        sleep 1.5
+    fi
+done
+
+if [ $DMG_DONE -eq 0 ]; then
+    hdiutil create -volname "MediaEngine" -srcfolder "$DMG_TMP" -ov -format UDZO "$DMG_PATH"
+fi
+
 rm -rf "$DMG_TMP"
 
 cd "$HOME"
