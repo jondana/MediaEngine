@@ -274,7 +274,7 @@ def find_binary(name):
 
 FFMPEG_BIN = find_binary("ffmpeg")
 FFPROBE_BIN = find_binary("ffprobe")
-SOUND_CHIME = "/System/Library/Sounds/Glass.aiff"
+SOUND_CHIME = "/System/Library/Sounds/Purr.aiff"
 LOG_FILE = os.path.expanduser("~/Library/Logs/MediaEngine.log")
 LOG_LOCK = threading.RLock()
 
@@ -555,7 +555,8 @@ def get_default_presets():
             "container": "Auto",
             "quality": "69",
             "quality_encoder": "AppleMediaEngine",
-            "audio": "Auto"
+            "audio": "Auto",
+            "denoise": True
         },
         "Non-Log Footage": {
             "codec": "HEVC (H.265)",
@@ -566,7 +567,8 @@ def get_default_presets():
             "container": "Auto",
             "quality": "58",
             "quality_encoder": "AppleMediaEngine",
-            "audio": "AAC"
+            "audio": "AAC",
+            "denoise": True
         },
         "Screen Recordings": {
             "codec": "HEVC (H.265)",
@@ -843,6 +845,8 @@ def get_settings_filename_tag(settings):
                 parts.append(f"CRF{crf_val}")
         except Exception:
             pass
+    if settings.get("denoise", False):
+        parts.append("NR")
     return " ".join(parts)
 
 RESERVED_OUTPUT_PATHS = set()
@@ -1798,9 +1802,14 @@ class QuartzQueueCanvas(tk.Canvas):
     def update_item_status(self, item_id, status, ptext=None, done_stats=None):
         item = self.item_map.get(item_id)
         if not item: return
+        old_status = item.get("status")
         item["status"] = status
         if ptext is not None: item["progress_text"] = ptext
         if done_stats is not None: item["done_stats"] = done_stats
+        if old_status == status and status in ("encoding", "suspended") and self.find_withtag(f"badge_txt_{item_id}"):
+            txt = f"ENCODING {ptext}" if (status == "encoding" and ptext) else (f"ON HOLD {ptext}" if ptext else "ON HOLD")
+            self.itemconfig(f"badge_txt_{item_id}", text=txt)
+            return
         self._redraw_row(item_id)
 
     def _get_visible_range(self):
@@ -1973,6 +1982,8 @@ class QuartzQueueCanvas(tk.Canvas):
                         s_parts.append(f"CRF {crf_disp}")
                 except Exception:
                     pass
+            if st.get("denoise"):
+                s_parts.append("NR")
         settings_str = " • ".join(s_parts)
 
         done_str = item.get("done_stats", "") if status == "completed" else ""
@@ -2235,6 +2246,7 @@ class EncoderApp:
         self.load_presets()
 
         self._preset_loading = False
+        self._updating_settings = False
         self.queue_lock = threading.RLock()
         self.process_lock = threading.RLock()
         self.ui_queue = queue.Queue()
@@ -2397,9 +2409,19 @@ class EncoderApp:
             with self.queue_lock:
                 for rid in self.running_ids:
                     it = self.items_by_id.get(rid)
-                    if it and it.get("settings", {}).get("encoder") == "CPU":
-                        active_enc = "CPU"
-                        break
+                    if it:
+                        enc = it.get("settings", {}).get("encoder")
+                        if enc == "CPU":
+                            active_enc = "CPU"
+                            break
+                        elif enc == "AppleMediaEngine":
+                            active_enc = "AppleMediaEngine"
+                if not active_enc:
+                    for q in self.queue_items:
+                        if q.get("status") == "queued":
+                            active_enc = q.get("settings", {}).get("encoder")
+                            if active_enc:
+                                break
             budget = self.get_concurrency_budget(encoder=active_enc)
             max_units = budget["max_units"]
             max_8k = budget["max_8k"]
@@ -2540,6 +2562,8 @@ class EncoderApp:
             self.switch_auto_start.configure(progress_color=ULTRA_BG, button_color=ULTRA_TEXT, button_hover_color=ULTRA_TEXT_HOVER)
         if hasattr(self, "cb_tag_settings"):
             self.cb_tag_settings.configure(fg_color=ULTRA_BG, hover_color=ULTRA_BG_HOVER, border_color=ULTRA_BORDER, checkmark_color=ULTRA_TEXT)
+        if hasattr(self, "cb_denoise"):
+            self.cb_denoise.configure(fg_color=ULTRA_BG, hover_color=ULTRA_BG_HOVER, border_color=ULTRA_BORDER, checkmark_color=ULTRA_TEXT)
         self.update_action_button_ui()
         self.update_settings_header_label()
         if hasattr(self, "active_jobs_canvas"):
@@ -2612,6 +2636,8 @@ class EncoderApp:
             if hasattr(self, "quality_slider"):
                 q = int(round(float(self.quality_slider.get())))
                 s_parts.append(f"Q{q}" if enc == "AppleMediaEngine" else f"CRF {q}")
+            if hasattr(self, "cb_denoise") and bool(self.cb_denoise.get()):
+                s_parts.append("NR")
             return " • ".join(s_parts)
         except Exception:
             return ""
@@ -2656,6 +2682,11 @@ class EncoderApp:
         self.tag_settings = val
         self.save_tag_settings(val)
         self.apply_settings_to_selected()
+
+    def toggle_denoise(self):
+        self.mark_custom_settings()
+        self.apply_settings_to_selected()
+        self.update_settings_summary()
 
     def update_settings_header_label(self):
         if not hasattr(self, "lbl_settings_toggle"):
@@ -3108,6 +3139,19 @@ class EncoderApp:
         else:
             self.cb_tag_settings.deselect()
         self.cb_tag_settings.pack(side="right")
+        self.cb_denoise = ctk.CTkCheckBox(
+            r4, text="Adaptive Denoise",
+            font=ctk.CTkFont(family="SF Pro Text", size=12, weight="bold"),
+            text_color=TEXT_PRIMARY,
+            fg_color=ULTRA_BG,
+            hover_color=ULTRA_BG_HOVER,
+            border_color=ULTRA_BORDER,
+            checkmark_color=ULTRA_TEXT,
+            corner_radius=4,
+            width=18, height=18, checkbox_width=18, checkbox_height=18,
+            command=self.toggle_denoise
+        )
+        self.cb_denoise.pack(side="right", padx=(0, 12))
         browse_btn = ctk.CTkButton(r4, text="Browse", width=66, height=30, corner_radius=8, fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER, font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), command=self.browse_dest)
         browse_btn.pack(side="right", padx=(0, 10))
         self.dest_entry = ctk.CTkEntry(r4, textvariable=self.dest_var, height=30, corner_radius=8, fg_color="#1a1a1a", border_width=0, font=ctk.CTkFont(family="SF Pro Text", size=13))
@@ -3438,6 +3482,15 @@ class EncoderApp:
                  ("Non-Log Preset", "HEVC • 10-Bit 4:2:0 • Quality: 58 (Balanced)"),
                  ("Why Q58 for Rec.709?", "Optimal sweet spot for delivery, web, and archives with high compression and zero visible loss."),
                  ("Software (CPU) Mode", "Direct CRF slider with tuned psycho-visual RD, SAO disabled, and AQ mode 3 for deep control.")
+             ]),
+
+            ("4. MOTION-SAFE ADAPTIVE DENOISE",
+             "Canon C-Log 2 / C-Log 3 footage contains CMOS shadow grain that wastes video bitrate if left untreated.",
+             [
+                 ("Luma-Only Processing", "Filters Plane 0 (Y) exclusively (p=1) while leaving Chroma (U/V) 100% untouched."),
+                 ("Zero Chromatic Ghosting", "Eliminates pink and magenta trailing artifacts behind moving hands and high-contrast edges."),
+                 ("Tuned Motion Gating", "Tight temporal thresholds (0a=0.008, 0b=0.016) abort filtering immediately during head turns and gestures."),
+                 ("Texture Preservation", "Leaves fine skin pores, eyelashes, and facial nuances crisp while cleaning flat shadow noise.")
              ]),
 
             ("5. TRANSPARENCY & ALPHA PRESERVATION",
@@ -4257,27 +4310,32 @@ class EncoderApp:
         except Exception: pass
 
     def mark_custom_settings(self):
-        if not self._preset_loading and not getattr(self, "_loading_selection_settings", False):
-            self.preset_var.set("Custom")
-            self.save_last_preset_choice("Custom")
+        if not self._preset_loading and not getattr(self, "_loading_selection_settings", False) and not getattr(self, "_updating_settings", False):
+            self._updating_settings = True
             try:
-                settings = self.get_current_settings()
-                self.presets["Custom"] = {
-                    "codec": settings.get("codec", "HEVC (H.265)"),
-                    "encoder": settings["encoder"],
-                    "chroma": settings["chroma"],
-                    "resolution": settings.get("resolution", "Original"),
-                    "framerate": settings.get("framerate", "Original"),
-                    "container": settings.get("container", "Auto"),
-                    "quality": str(int(round(float(settings["quality"])))),
-                    "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
-                    "audio": settings.get("audio", "Auto")
-                }
-                self.save_presets_to_disk()
-            except Exception:
-                pass
-            self.update_settings_summary()
-            self.apply_settings_to_selected()
+                self.preset_var.set("Custom")
+                self.save_last_preset_choice("Custom")
+                try:
+                    settings = self.get_current_settings()
+                    self.presets["Custom"] = {
+                        "codec": settings.get("codec", "HEVC (H.265)"),
+                        "encoder": settings["encoder"],
+                        "chroma": settings["chroma"],
+                        "resolution": settings.get("resolution", "Original"),
+                        "framerate": settings.get("framerate", "Original"),
+                        "container": settings.get("container", "Auto"),
+                        "quality": str(int(round(float(settings["quality"])))),
+                        "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
+                        "audio": settings.get("audio", "Auto"),
+                        "denoise": bool(settings.get("denoise", False))
+                    }
+                    self.save_presets_to_disk()
+                except Exception:
+                    pass
+                self.update_settings_summary()
+                self.apply_settings_to_selected()
+            finally:
+                self._updating_settings = False
 
     def refresh_preset_dropdown(self, select_preset=None):
         keys = list(self.presets.keys())
@@ -4311,7 +4369,8 @@ class EncoderApp:
             "container": settings.get("container", "Auto"),
             "quality": str(int(round(float(settings["quality"])))),
             "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
-            "audio": settings.get("audio", "Auto")
+            "audio": settings.get("audio", "Auto"),
+            "denoise": bool(settings.get("denoise", False))
         }
         self.save_presets_to_disk()
         self.save_last_preset_choice(preset_name)
@@ -4554,6 +4613,8 @@ class EncoderApp:
         self.lbl_quality_val.configure(text=get_quality_description(val, self.encoder_var.get()))
 
     def on_codec_menu_change(self, choice=None):
+        if self._preset_loading or getattr(self, "_loading_selection_settings", False) or getattr(self, "_updating_settings", False):
+            return
         self.sync_encoder_ui()
         self.mark_custom_settings()
 
@@ -4562,42 +4623,52 @@ class EncoderApp:
         if name in self.presets:
             self.save_last_preset_choice(name)
             self._preset_loading = True
-            p = self.presets[name]
-            c_val = str(p.get("container", "Auto")).strip().upper()
-            c_disp = c_val if c_val in ("MP4", "MOV") else "Auto"
-            self.current_container = c_disp
-            if hasattr(self, "container_var"):
-                self.container_var.set(c_disp)
-            self.current_audio = p.get("audio", "Auto")
-            self.codec_var.set(p.get("codec", "HEVC (H.265)"))
-            self.current_encoder = p.get("encoder", "AppleMediaEngine")
-            self.encoder_var.set(self.current_encoder)
-            chroma_setting = p.get("chroma", DEFAULT_CHROMA)
-            if not HAS_VT_422 and "4:2:2" in chroma_setting: chroma_setting = "10-Bit 4:2:0"
-            self.chroma_var.set(chroma_setting)
-            res_setting = p.get("resolution", "Original")
-            if hasattr(self, "resolution_var"):
-                self.resolution_var.set(res_setting if res_setting in self.resolution_cb.cget("values") else "Original")
-            fps_setting = p.get("framerate", "Original")
-            if hasattr(self, "framerate_var"):
-                self.framerate_var.set(fps_setting if fps_setting in self.framerate_cb.cget("values") else "Original")
-            try: q_val = int(float(p.get("quality", 69)))
-            except ValueError: q_val = 69
-            q_enc = p.get("quality_encoder", p.get("encoder", "AppleMediaEngine"))
-            if self.encoder_var.get() == "AppleMediaEngine":
-                if q_enc == "CPU":
-                    q_val = crf_to_vt(q_val)
-                self.last_vt_quality = max(1, min(100, q_val))
-            else:
-                if q_enc == "AppleMediaEngine":
-                    q_val = vt_to_crf(q_val)
-                self.last_cpu_crf = max(0, min(51, q_val))
-            self.sync_encoder_ui()
-            self._preset_loading = False
+            self._updating_settings = True
+            try:
+                p = self.presets[name]
+                c_val = str(p.get("container", "Auto")).strip().upper()
+                c_disp = c_val if c_val in ("MP4", "MOV") else "Auto"
+                self.current_container = c_disp
+                if hasattr(self, "container_var"):
+                    self.container_var.set(c_disp)
+                self.current_audio = p.get("audio", "Auto")
+                self.codec_var.set(p.get("codec", "HEVC (H.265)"))
+                if hasattr(self, "cb_denoise"):
+                    p_denoise = bool(p.get("denoise", name in ("Log Footage", "Non-Log Footage")))
+                    if p_denoise: self.cb_denoise.select()
+                    else: self.cb_denoise.deselect()
+                self.current_encoder = p.get("encoder", "AppleMediaEngine")
+                self.encoder_var.set(self.current_encoder)
+                chroma_setting = p.get("chroma", DEFAULT_CHROMA)
+                if not HAS_VT_422 and "4:2:2" in chroma_setting: chroma_setting = "10-Bit 4:2:0"
+                self.chroma_var.set(chroma_setting)
+                res_setting = p.get("resolution", "Original")
+                if hasattr(self, "resolution_var"):
+                    self.resolution_var.set(res_setting if res_setting in self.resolution_cb.cget("values") else "Original")
+                fps_setting = p.get("framerate", "Original")
+                if hasattr(self, "framerate_var"):
+                    self.framerate_var.set(fps_setting if fps_setting in self.framerate_cb.cget("values") else "Original")
+                try: q_val = int(float(p.get("quality", 69)))
+                except ValueError: q_val = 69
+                q_enc = p.get("quality_encoder", p.get("encoder", "AppleMediaEngine"))
+                if self.encoder_var.get() == "AppleMediaEngine":
+                    if q_enc == "CPU":
+                        q_val = crf_to_vt(q_val)
+                    self.last_vt_quality = max(1, min(100, q_val))
+                else:
+                    if q_enc == "AppleMediaEngine":
+                        q_val = vt_to_crf(q_val)
+                    self.last_cpu_crf = max(0, min(51, q_val))
+                self.sync_encoder_ui()
+            finally:
+                self._preset_loading = False
+                self._updating_settings = False
             self.update_settings_summary()
             self.apply_settings_to_selected()
 
     def on_encoder_menu_change(self, choice=None):
+        if self._preset_loading or getattr(self, "_loading_selection_settings", False) or getattr(self, "_updating_settings", False):
+            return
         new_enc = self.encoder_var.get()
         if new_enc != self.current_encoder:
             cur_val = int(round(self.quality_slider.get()))
@@ -4627,9 +4698,9 @@ class EncoderApp:
             mods = str(getattr(event, "modifier", "")).lower()
             if "alt" in mods or "opt" in mods:
                 return True
-        if is_macos_option_held():
+        if getattr(self, "_option_key_pressed", False):
             return True
-        return getattr(self, "_option_key_pressed", False)
+        return is_macos_option_held()
 
     def _sync_option_ui_state(self):
         held = self.is_option_held()
@@ -4638,11 +4709,12 @@ class EncoderApp:
 
     def _poll_option_key(self):
         try:
-            self._sync_option_ui_state()
+            if self.root.focus_displayof() is not None:
+                self._sync_option_ui_state()
         except Exception:
             pass
         finally:
-            self.root.after(30, self._poll_option_key)
+            self.root.after(350, self._poll_option_key)
 
     def setup_drag_and_drop(self):
         if not HAS_TKDND or not getattr(self.root, "TkdndVersion", None):
@@ -4768,7 +4840,8 @@ class EncoderApp:
             "quality_encoder": self.encoder_var.get(),
             "speed": "fast",
             "concurrency": getattr(self, "concurrency_mode", "Balanced"),
-            "tag_settings": bool(getattr(self, "tag_settings", False))
+            "tag_settings": bool(getattr(self, "tag_settings", False)),
+            "denoise": bool(self.cb_denoise.get()) if hasattr(self, "cb_denoise") else (preset_name in ("Log Footage", "Non-Log Footage"))
         }
 
     def handle_incoming_files(self, files):
@@ -5194,6 +5267,9 @@ class EncoderApp:
                     self.tag_settings = bool(st["tag_settings"])
                     if self.tag_settings: self.cb_tag_settings.select()
                     else: self.cb_tag_settings.deselect()
+                if "denoise" in st and hasattr(self, "cb_denoise"):
+                    if st["denoise"]: self.cb_denoise.select()
+                    else: self.cb_denoise.deselect()
             finally:
                 self._loading_selection_settings = False
         self.update_settings_header_label()
@@ -5600,14 +5676,19 @@ class EncoderApp:
                 with self.queue_lock:
                     for rid in running_snapshot:
                         it = self.items_by_id.get(rid)
-                        if it and it.get("settings", {}).get("encoder") == "CPU":
-                            active_enc = "CPU"
-                            break
+                        if it:
+                            enc = it.get("settings", {}).get("encoder")
+                            if enc == "CPU":
+                                active_enc = "CPU"
+                                break
+                            elif enc == "AppleMediaEngine":
+                                active_enc = "AppleMediaEngine"
                     if not active_enc:
                         for q in self.queue_items:
-                            if q["status"] == "queued":
+                            if q.get("status") == "queued":
                                 active_enc = q.get("settings", {}).get("encoder")
-                                break
+                                if active_enc:
+                                    break
 
                 budget = self.get_concurrency_budget(encoder=active_enc)
                 max_units = budget["max_units"]
@@ -5883,14 +5964,15 @@ class EncoderApp:
             range_ff, range_x265, color_space, color_prim, color_trc, master_display_str, cll_str = self.get_color_and_hdr_metadata(f, probe_data=probe)
             v_codec_in = str(probe.get("streams", [{}])[0].get("codec_name", "")).lower() if probe.get("streams") else ""
             is_nle_master = any(k in v_codec_in for k in ("prores", "dnxhd", "dnxhr"))
-            if not is_nle_master and settings.get("preset") == "Log Footage":
-                if range_ff != "tv":
-                    range_ff, range_x265 = ("full", "full")
+            preset_name = settings.get("preset", "")
+            is_log_workflow = (preset_name == "Log Footage") or (preset_name == "Custom" and "10-Bit" in str(chroma_choice)) or ("log" in str(preset_name).lower())
+            if not is_nle_master and is_log_workflow and range_ff != "tv":
+                range_ff, range_x265 = ("full", "full")
             is_pq = color_trc in ("smpte2084", "pq")
             is_hlg = color_trc in ("arib-std-b67", "hlg", "arib_std_b67")
             is_bt2020 = color_prim in ("bt2020", "bt2020-10", "bt2020-12", "bt2020_10", "bt2020_12")
             wide_or_hdr = (is_pq or is_hlg) or is_bt2020 or bool(master_display_str or cll_str)
-            if not wide_or_hdr and settings.get("preset") != "Log Footage":
+            if not wide_or_hdr and not is_log_workflow and range_ff != "full":
                 range_ff, range_x265 = ("tv", "limited")
 
             is_sd = (width < 1280 and height < 720 and width > 0 and height > 0)
@@ -5919,6 +6001,10 @@ class EncoderApp:
                 vf_filters.append(f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd")
             elif width % 2 != 0 or height % 2 != 0:
                 vf_filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic")
+
+            is_adaptive_denoise = bool(settings.get("denoise", False))
+            if is_adaptive_denoise and not has_alpha and (width > 0 and height > 0):
+                vf_filters.append("atadenoise=0a=0.008:0b=0.016:s=5:p=1:a=p")
 
             # Emulate Apple AVAssetExportSession: auto-pad video tail to audio duration & conform low/VFR framerates
             has_vid = (width > 0 and height > 0)
@@ -6042,9 +6128,10 @@ class EncoderApp:
             enc_name = "AppleMediaEngine" if is_videotoolbox else "CPU (Software)"
             audio_tag_str = "24-Bit LPCM" if keep_lpcm else ("AAC" if audio_args else "None")
             scale_log = f" • Scale: {target_w}x{target_h} [Lanczos]" if (target_w and target_h and target_w != width) else ""
+            denoise_log = " • Denoise: Motion-Safe Luma (C-Log Optimized)" if is_adaptive_denoise and not has_alpha else ""
             self.append_log(
                 f"\n▶ [START] {display_name}\n"
-                f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info}{scale_log} • Audio: {audio_tag_str}\n"
+                f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info}{scale_log}{denoise_log} • Audio: {audio_tag_str}\n"
                 f"  • Source:   {width}x{height} ({res_lbl}) @ {orig_fps:.2f} fps • {format_time_duration(duration, duration >= 3600)}\n"
                 f"  • Output:   {out_file}\n"
             )
@@ -6060,7 +6147,7 @@ class EncoderApp:
             is_10bit = any(x in pix_fmt_in for x in ("10le", "10be", "p010", "p210", "10")) or ("10" in in_profile)
             is_h264_input = in_codec in ("h264", "avc", "avc1")
             can_hwaccel_dec = (
-                has_video and not wide_or_hdr and not has_alpha and not is_vfr_or_low and not is_h264_input and (
+                has_video and not wide_or_hdr and range_ff != "full" and not has_alpha and not is_vfr_or_low and not is_h264_input and (
                     ("hevc" in in_codec or "h265" in in_codec) or
                     ("prores" in in_codec)
                 )
@@ -6117,10 +6204,7 @@ class EncoderApp:
                     cmd.extend(["-allow_sw", "1"])
                     if has_alpha:
                         cmd.extend(["-alpha_quality", "0.75"])
-                    eff_w = target_w if target_w else width
-                    eff_h = target_h if target_h else height
-                    is_8k_enc = (eff_w >= 7000 or eff_h >= 4000)
-                    vt_extra = ["-realtime", "1", "-prio_speed", "1"] if is_8k_enc else (
+                    vt_extra = (
                         (["-spatial_aq", "1"] if HAS_VT_SPATIAL_AQ else []) +
                         ["-prio_speed", "0", "-realtime", "0", "-power_efficient", "0"]
                     )
@@ -6151,14 +6235,13 @@ class EncoderApp:
             exit_code = 1
             stderr_dump = ""
             is_cancelled = False
-            prefix = ["nice", "-n", "15"] if shutil.which("nice") else []
 
             for attempt in range(4):
                 if attempt > 0:
                     self.last_pct_map[item_id] = 0.0
                     self.update_progress_ui(item_id, 0.0, "00:00 / --:--", "0.0x", "0 fps", "ETA: --:--")
                 stderr_lines = deque(maxlen=1000)
-                exec_cmd = prefix + cmd if prefix else cmd
+                exec_cmd = cmd
                 with self.hw_launch_lock:
                     with self.process_lock:
                         if item_id in self.cancelled_ids or self.cancel_requested:
@@ -6293,7 +6376,7 @@ class EncoderApp:
                                 self.update_item_status_ui(item_id, "encoding", "100%")
                                 break
                             else:
-                                if (now_t - last_progress_push) >= 0.15:
+                                if (now_t - last_progress_push) >= 0.25:
                                     last_progress_push = now_t
                                     if has_video and total_frames > 0:
                                         raw_pct = min(99.9, max(0.0, (cur_frame / float(total_frames)) * 100.0))
