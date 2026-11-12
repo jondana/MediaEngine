@@ -3488,9 +3488,9 @@ class EncoderApp:
             ("4. MOTION-SAFE ADAPTIVE DENOISE",
              "Canon C-Log 2 / C-Log 3 footage contains CMOS shadow grain that wastes video bitrate if left untreated.",
              [
-                 ("Dual-Domain Gating", "Filters Luma (Y) and Chroma (U/V) with strict motion-abort gating (p=7, a=p)."),
-                 ("Shadow Chroma Cleanup", "Calibrated chroma thresholds (1a/2a=0.004, 1b/2b=0.008) eliminate static shadow color speckling."),
-                 ("Zero Chromatic Ghosting", "Ultra-tight chroma motion thresholds abort filtering on any delta >0.8%, preventing pink hand trails."),
+                 ("Hybrid Architecture", "Tight Luma filtering (atadenoise s=5, p=1) + Multi-pass Gaussian Chroma Diffusion (gblur steps=2)."),
+                 ("Zero Chromatic Smearing", "Because Chroma (U/V) is filtered purely spatially within each frame, fast hands can NEVER leave pink trails."),
+                 ("Blotch-Free Gaussian Diffusion", "Bell-curve Gaussian smoothing eliminates box-blur plateaus, dissolving all macro-color clouds into clean black."),
                  ("Texture Preservation", "Leaves fine skin pores, eyelashes, and facial nuances crisp while cleaning flat shadow noise.")
              ]),
 
@@ -6005,7 +6005,8 @@ class EncoderApp:
 
             is_adaptive_denoise = bool(settings.get("denoise", False))
             if is_adaptive_denoise and not has_alpha and (width > 0 and height > 0):
-                vf_filters.append("atadenoise=0a=0.008:0b=0.016:1a=0.004:1b=0.008:2a=0.004:2b=0.008:s=5:p=7:a=p")
+                c_sig = 9.0 if max(width, height) >= 7000 else (6.0 if max(width, height) >= 3000 else 3.5)
+                vf_filters.append(f"atadenoise=0a=0.008:0b=0.016:s=5:p=1:a=p,gblur=sigma={c_sig}:steps=2:planes=6")
 
             # Emulate Apple AVAssetExportSession: auto-pad video tail to audio duration & conform low/VFR framerates
             has_vid = (width > 0 and height > 0)
@@ -6129,7 +6130,7 @@ class EncoderApp:
             enc_name = "AppleMediaEngine" if is_videotoolbox else "CPU (Software)"
             audio_tag_str = "24-Bit LPCM" if keep_lpcm else ("AAC" if audio_args else "None")
             scale_log = f" • Scale: {target_w}x{target_h} [Lanczos]" if (target_w and target_h and target_w != width) else ""
-            denoise_log = " • Denoise: Motion-Gated Luma+Chroma (C-Log Optimized)" if is_adaptive_denoise and not has_alpha else ""
+            denoise_log = " • Denoise: Organic Luma Grain + Multi-Pass Gaussian Chroma (C-Log Optimized)" if is_adaptive_denoise and not has_alpha else ""
             self.append_log(
                 f"\n▶ [START] {display_name}\n"
                 f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info}{scale_log}{denoise_log} • Audio: {audio_tag_str}\n"
