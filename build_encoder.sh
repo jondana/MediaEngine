@@ -3487,9 +3487,9 @@ class EncoderApp:
             ("4. MOTION-SAFE ADAPTIVE DENOISE",
              "Canon C-Log 2 / C-Log 3 footage contains CMOS shadow grain that wastes video bitrate if left untreated.",
              [
-                 ("Luma-Only Processing", "Filters Plane 0 (Y) exclusively (p=1) while leaving Chroma (U/V) 100% untouched."),
-                 ("Zero Chromatic Ghosting", "Eliminates pink and magenta trailing artifacts behind moving hands and high-contrast edges."),
-                 ("Tuned Motion Gating", "Tight temporal thresholds (0a=0.008, 0b=0.016) abort filtering immediately during head turns and gestures."),
+                 ("Dual-Domain Gating", "Filters Luma (Y) and Chroma (U/V) with strict motion-abort gating (p=7, a=p)."),
+                 ("Shadow Chroma Cleanup", "Calibrated chroma thresholds (1a/2a=0.004, 1b/2b=0.008) eliminate static shadow color speckling."),
+                 ("Zero Chromatic Ghosting", "Ultra-tight chroma motion thresholds abort filtering on any delta >0.8%, preventing pink hand trails."),
                  ("Texture Preservation", "Leaves fine skin pores, eyelashes, and facial nuances crisp while cleaning flat shadow noise.")
              ]),
 
@@ -6004,7 +6004,7 @@ class EncoderApp:
 
             is_adaptive_denoise = bool(settings.get("denoise", False))
             if is_adaptive_denoise and not has_alpha and (width > 0 and height > 0):
-                vf_filters.append("atadenoise=0a=0.008:0b=0.016:s=5:p=1:a=p")
+                vf_filters.append("atadenoise=0a=0.008:0b=0.016:1a=0.004:1b=0.008:2a=0.004:2b=0.008:s=5:p=7:a=p")
 
             # Emulate Apple AVAssetExportSession: auto-pad video tail to audio duration & conform low/VFR framerates
             has_vid = (width > 0 and height > 0)
@@ -6128,7 +6128,7 @@ class EncoderApp:
             enc_name = "AppleMediaEngine" if is_videotoolbox else "CPU (Software)"
             audio_tag_str = "24-Bit LPCM" if keep_lpcm else ("AAC" if audio_args else "None")
             scale_log = f" • Scale: {target_w}x{target_h} [Lanczos]" if (target_w and target_h and target_w != width) else ""
-            denoise_log = " • Denoise: Motion-Safe Luma (C-Log Optimized)" if is_adaptive_denoise and not has_alpha else ""
+            denoise_log = " • Denoise: Motion-Gated Luma+Chroma (C-Log Optimized)" if is_adaptive_denoise and not has_alpha else ""
             self.append_log(
                 f"\n▶ [START] {display_name}\n"
                 f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info}{scale_log}{denoise_log} • Audio: {audio_tag_str}\n"
