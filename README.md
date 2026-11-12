@@ -1,4 +1,5 @@
-<img width="1510" height="1900" alt="Screenshot 2026-09-07 at 2 27 52 PM" src="https://github.com/user-attachments/assets/3a9118b9-6db2-4505-89f9-00c7e621c90e" />
+<img width="1592" height="1968" alt="Screenshot 2026-11-12 at 12 27 21 PM" src="https://github.com/user-attachments/assets/4288d1c8-40f7-4d66-a2b5-7e8449eebed6" />
+
 
 # MediaEngine
 
