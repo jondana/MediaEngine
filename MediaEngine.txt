@@ -6014,11 +6014,11 @@ class EncoderApp:
                 else:
                     yuv_fmt, yuva_fmt = "yuv420p", "yuva420p"
 
-                c_sigma = 8.0 if max(width, height) >= 7000 else (5.0 if max(width, height) >= 3000 else 3.5)
+                c_rad = 6 if max(width, height) >= 7000 else (4 if max(width, height) >= 3000 else 2)
                 denoise_subgraph = (
                     f"atadenoise=0a=0.008:0b=0.016:s=5:p=1:a=p,format={yuv_fmt},"
                     f"split=3[dn_orig][dn_in][dn_mask];"
-                    f"[dn_in]gblur=sigma={c_sigma}:steps=2:planes=6[dn_filt];"
+                    f"[dn_in]avgblur=sizeX={c_rad}:planes=6[dn_filt];"
                     f"[dn_mask]lutyuv=y='(0.30*maxval-val)*12.5'[dn_m];"
                     f"[dn_filt][dn_m]mergeplanes=mapping=0x00010210:format={yuva_fmt}[dn_alpha];"
                     f"[dn_orig][dn_alpha]overlay=format=auto,format={yuv_fmt}"
