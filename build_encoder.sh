@@ -110,7 +110,7 @@ import time
 import atexit
 import traceback
 import tkinter as tk
-from tkinter import messagebox, filedialog, colorchooser
+from tkinter import messagebox, filedialog, colorchooser, font as tkfont
 import customtkinter as ctk
 import webbrowser
 try:
@@ -975,7 +975,9 @@ class QuartzKineticScroller:
             self.target_y = self.current_y
             self.velocity = 0.0
             if total_h > 0:
-                self.set_view_fraction(self.current_y / total_h)
+                clamped_frac = self.current_y / total_h
+                if abs(frac - clamped_frac) > 0.001:
+                    self.set_view_fraction(clamped_frac)
 
     def handle_wheel_input(self, delta_input):
         metrics = self.get_view_metrics()
@@ -1298,7 +1300,7 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             self.redraw_all()
 
         if still_animating:
-            self._anim_job = self.after(12, self._tween_step)
+            self._anim_job = self.after(40, self._tween_step)
 
     def _update_job_pbar(self, item_id, pct):
         job = self.jobs.get(item_id)
@@ -1333,12 +1335,14 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                         self.tag_raise(text_tag)
             else:
                 self.coords(tag, *pts)
-                self.itemconfigure(tag, fill=p_col, outline=p_col, width=stroke_w, joinstyle=tk.ROUND, state="normal")
+                if job.get("_last_pbar_col") != p_col:
+                    self.itemconfigure(tag, fill=p_col, outline=p_col, width=stroke_w, joinstyle=tk.ROUND, state="normal")
+                    job["_last_pbar_col"] = p_col
 
-            if not is_done:
-                self.itemconfig(f"pct_{item_id}", text=f"{min(99.9, pct):.1f}%", fill=blend_hex(ULTRA_TEXT, CARD_BG, alpha))
-            else:
-                self.itemconfig(f"pct_{item_id}", text="100%", fill=blend_hex(DONE_GREEN, CARD_BG, alpha))
+            disp_pct_str = f"{min(99.9, pct):.1f}%" if not is_done else "100%"
+            pct_col = blend_hex(DONE_GREEN if is_done else ULTRA_TEXT, CARD_BG, alpha)
+            if self.itemcget(f"pct_{item_id}", "text") != disp_pct_str:
+                self.itemconfig(f"pct_{item_id}", text=disp_pct_str, fill=pct_col)
         except tk.TclError:
             pass
 
@@ -1374,7 +1378,8 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             job["done_metrics"] = f"{clean_t}  •  Completed" if clean_t else "Completed"
         if not job.get("is_done_ui"):
             metrics_txt = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
-            self.itemconfig(f"metrics_{item_id}", text=metrics_txt)
+            if self.itemcget(f"metrics_{item_id}", "text") != metrics_txt:
+                self.itemconfig(f"metrics_{item_id}", text=metrics_txt)
         self._start_tween()
 
     def end_job(self, item_id, completed=True):
@@ -1647,12 +1652,20 @@ class QuartzQueueCanvas(tk.Canvas):
             after_fn=self.after,
             cancel_after_fn=self.after_cancel
         )
+        self._font_title = tkfont.Font(family="SF Pro Text", size=11)
+        self._font_sub = tkfont.Font(family="SF Pro Text", size=10)
+        self._tooltip_win = None
+        self._tooltip_lbl_title = None
+        self._tooltip_lbl_sub = None
+        self._tooltip_row_id = None
+        self._tooltip_after_id = None
         self.hovered_del_id = None
         self.hovered_info_id = None
         self.bind("<Configure>", self._on_resize)
         self.bind("<Motion>", self._on_mouse_move)
         self.bind("<Leave>", self._on_mouse_leave)
         self.bind("<Button-1>", self._on_click)
+        self.bind("<Destroy>", lambda e: self._destroy_tooltip() if e.widget is self else None)
 
     def _get_bg_rgb(self):
         try:
@@ -1733,16 +1746,22 @@ class QuartzQueueCanvas(tk.Canvas):
                 self._external_yscrollcommand(first, last)
             except Exception:
                 pass
+        if getattr(self, "_last_scroll_notify_bounds", None) == (first, last):
+            return
+        self._last_scroll_notify_bounds = (first, last)
         if not self._updating_viewport:
             self._update_visible_rows()
 
     def yview(self, *args):
+        if args:
+            self._cancel_tooltip()
         res = super().yview(*args)
         if args and not self._updating_viewport:
             self._update_visible_rows()
         return res
 
     def yview_moveto(self, fraction):
+        self._cancel_tooltip()
         res = super().yview_moveto(fraction)
         if not self._updating_viewport:
             self._update_visible_rows()
@@ -1771,6 +1790,7 @@ class QuartzQueueCanvas(tk.Canvas):
                 self.itemconfig("placeholder", text=txt)
 
     def set_items(self, items):
+        self._cancel_tooltip()
         self.items = list(items)
         self.item_map = {x["id"]: x for x in self.items}
         self.redraw_all()
@@ -1808,7 +1828,8 @@ class QuartzQueueCanvas(tk.Canvas):
         if done_stats is not None: item["done_stats"] = done_stats
         if old_status == status and status in ("encoding", "suspended") and self.find_withtag(f"badge_txt_{item_id}"):
             txt = f"ENCODING {ptext}" if (status == "encoding" and ptext) else (f"ON HOLD {ptext}" if ptext else "ON HOLD")
-            self.itemconfig(f"badge_txt_{item_id}", text=txt)
+            if self.itemcget(f"badge_txt_{item_id}", "text") != txt:
+                self.itemconfig(f"badge_txt_{item_id}", text=txt)
             return
         self._redraw_row(item_id)
 
@@ -1884,9 +1905,6 @@ class QuartzQueueCanvas(tk.Canvas):
                     self.rendered_rows[idx] = item["id"]
 
             self._update_gradients(w, total_h)
-
-            if not self.scroller.is_animating:
-                self.scroller.sync_position()
         finally:
             self._updating_viewport = False
 
@@ -1989,30 +2007,29 @@ class QuartzQueueCanvas(tk.Canvas):
         done_str = item.get("done_stats", "") if status == "completed" else ""
         raw_name = item.get("display_name", item.get("filename", ""))
         avail_w = max(40, (left_cx - 16) - (x1 + 12))
-        settings_w = int(len(settings_str) * 6.0) if settings_str else 0
-        done_w = int(len(done_str) * 6.0) if done_str else 0
-        gap = 10 if (settings_str or done_str) else 0
-        max_name_w = max(80, avail_w - settings_w - done_w - (gap * 2))
-        max_name_chars = max(8, int(max_name_w / 7.2))
-        disp_name = raw_name[:max_name_chars - 3] + "..." if len(raw_name) > max_name_chars else raw_name
+        settings_w = self._font_sub.measure(settings_str) if settings_str else 0
+        done_w = self._font_sub.measure(done_str) if done_str else 0
+        gap = 10
+        gap_total = gap * ((1 if settings_str else 0) + (1 if done_str else 0))
+        min_name_w = min(avail_w, max(80, int(avail_w * 0.35)))
+        max_name_w = max(min_name_w, avail_w - settings_w - done_w - gap_total)
+        disp_name = self._truncate_to_width(raw_name, self._font_title, max_name_w)
 
         t_name = self.create_text(x1 + 12, (y1 + y2) / 2, text=disp_name, fill=TEXT_PRIMARY, anchor="w", font=("SF Pro Text", 11), tags=("title", f"title_{iid}", f"row_item_{iid}"))
 
-        cur_x = (self.bbox(t_name)[2] + gap) if self.bbox(t_name) else (x1 + 12 + int(len(disp_name) * 7.2) + gap)
+        cur_x = (self.bbox(t_name)[2] + gap) if self.bbox(t_name) else (x1 + 12 + self._font_title.measure(disp_name) + gap)
 
         if settings_str:
             rem_w = max(10, (left_cx - 12 - done_w - (gap if done_str else 0)) - cur_x)
-            max_s_chars = max(5, int(rem_w / 6.0))
-            disp_settings = settings_str[:max_s_chars - 3] + "..." if len(settings_str) > max_s_chars else settings_str
             if rem_w >= 20:
+                disp_settings = self._truncate_to_width(settings_str, self._font_sub, rem_w)
                 t_set = self.create_text(cur_x, (y1 + y2) / 2, text=disp_settings, fill=TEXT_MUTED, anchor="w", font=("SF Pro Text", 10), tags=("settings", f"settings_{iid}", f"row_item_{iid}"))
-                cur_x = (self.bbox(t_set)[2] + gap) if self.bbox(t_set) else (cur_x + int(len(disp_settings) * 6.0) + gap)
+                cur_x = (self.bbox(t_set)[2] + gap) if self.bbox(t_set) else (cur_x + self._font_sub.measure(disp_settings) + gap)
 
         if done_str:
             rem_w = max(10, (left_cx - 12) - cur_x)
-            max_d_chars = max(5, int(rem_w / 6.0))
-            disp_done = done_str[:max_d_chars - 3] + "..." if len(done_str) > max_d_chars else done_str
             if rem_w >= 20:
+                disp_done = self._truncate_to_width(done_str, self._font_sub, rem_w)
                 self.create_text(cur_x, (y1 + y2) / 2, text=disp_done, fill=DONE_GREEN, anchor="w", font=("SF Pro Text", 10), tags=("done_stats", f"done_stats_{iid}", f"row_item_{iid}"))
 
     def _draw_rounded_rect(self, x1, y1, x2, y2, radius=8, **kwargs):
@@ -2090,10 +2107,117 @@ class QuartzQueueCanvas(tk.Canvas):
             return "select", item["id"]
         return None, None
 
+    def _truncate_to_width(self, text, font_obj, max_w):
+        if not text or font_obj.measure(text) <= max_w:
+            return text
+        ell = "..."
+        ell_w = font_obj.measure(ell)
+        if max_w <= ell_w:
+            return text[:1] + ell if len(text) > 1 else text
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if font_obj.measure(text[:mid]) + ell_w <= max_w:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:max(1, lo)] + ell
+
+    def _cancel_tooltip(self):
+        if getattr(self, "_tooltip_after_id", None):
+            try:
+                self.after_cancel(self._tooltip_after_id)
+            except Exception:
+                pass
+            self._tooltip_after_id = None
+        self._tooltip_row_id = None
+        if getattr(self, "_tooltip_win", None):
+            try:
+                self._tooltip_win.withdraw()
+            except Exception:
+                pass
+
+    def _destroy_tooltip(self):
+        self._cancel_tooltip()
+        if getattr(self, "_tooltip_win", None):
+            try:
+                self._tooltip_win.destroy()
+            except Exception:
+                pass
+            self._tooltip_win = None
+
+    def _show_tooltip(self, item_id):
+        self._tooltip_after_id = None
+        if not self.winfo_exists() or not self.winfo_ismapped() or self._tooltip_row_id != item_id:
+            return
+        item = self.item_map.get(item_id)
+        if not item:
+            return
+        try:
+            rx, ry = self.winfo_pointerxy()
+            wx, wy = self.winfo_rootx(), self.winfo_rooty()
+            if not (wx <= rx <= wx + self.winfo_width() and wy <= ry <= wy + self.winfo_height()):
+                return
+        except Exception:
+            return
+
+        full_name = item.get("display_name") or item.get("filename") or ""
+        if not full_name:
+            return
+
+        if not self._tooltip_win or not self._tooltip_win.winfo_exists():
+            win = tk.Toplevel(self)
+            win.withdraw()
+            win.overrideredirect(True)
+            try:
+                win.attributes("-topmost", True)
+            except Exception:
+                pass
+            win.configure(bg="#2e2e2e")
+            frame = tk.Frame(win, bg="#181818", padx=9, pady=6)
+            frame.pack(padx=1, pady=1)
+            lbl_t = tk.Label(frame, text="", bg="#181818", fg=TEXT_PRIMARY, font=("SF Pro Text", 11, "bold"), justify="left", anchor="w", wraplength=540)
+            lbl_t.pack(anchor="w")
+            lbl_s = tk.Label(frame, text="", bg="#181818", fg=DONE_GREEN, font=("SF Pro Text", 10), justify="left", anchor="w", wraplength=540)
+            for w in (win, frame, lbl_t, lbl_s):
+                w.bind("<Enter>", lambda e: self._cancel_tooltip())
+                w.bind("<Button-1>", lambda e: self._cancel_tooltip())
+            self._tooltip_win = win
+            self._tooltip_lbl_title = lbl_t
+            self._tooltip_lbl_sub = lbl_s
+
+        self._tooltip_lbl_title.configure(text=full_name)
+        done_stats = item.get("done_stats", "").lstrip("• ").strip() if item.get("status") == "completed" else ""
+        if done_stats:
+            self._tooltip_lbl_sub.configure(text=done_stats, fg=DONE_GREEN)
+            if not self._tooltip_lbl_sub.winfo_ismapped():
+                self._tooltip_lbl_sub.pack(anchor="w", pady=(2, 0))
+        else:
+            if self._tooltip_lbl_sub.winfo_ismapped():
+                self._tooltip_lbl_sub.pack_forget()
+
+        win = self._tooltip_win
+        win.update_idletasks()
+        tw, th = win.winfo_reqwidth(), win.winfo_reqheight()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        px = min(max(8, rx + 12), max(8, sw - tw - 8))
+        py = ry + 18
+        if py + th > sh - 8:
+            py = max(8, ry - th - 10)
+        win.geometry(f"+{px}+{py}")
+        win.deiconify()
+
     def _on_mouse_move(self, event):
         cx, cy = self.canvasx(event.x), self.canvasy(event.y)
         action, target_id = self._get_target_action(cx, cy)
         self.configure(cursor="hand2" if action in ("delete", "info") else "")
+
+        hover_row_id = target_id if action == "select" else None
+        if hover_row_id != self._tooltip_row_id:
+            self._cancel_tooltip()
+            self._tooltip_row_id = hover_row_id
+            if hover_row_id is not None:
+                self._tooltip_after_id = self.after(350, lambda rid=hover_row_id: self._show_tooltip(rid))
 
         if action == "delete" and target_id != self.hovered_del_id:
             if self.hovered_del_id:
@@ -2120,6 +2244,7 @@ class QuartzQueueCanvas(tk.Canvas):
             self.hovered_info_id = None
 
     def _on_mouse_leave(self, event):
+        self._cancel_tooltip()
         self.configure(cursor="")
         if self.hovered_del_id:
             self.itemconfig(f"del_btn_{self.hovered_del_id}", fill="#1c1c1c", outline="")
@@ -2131,6 +2256,7 @@ class QuartzQueueCanvas(tk.Canvas):
             self.hovered_info_id = None
 
     def _on_click(self, event):
+        self._cancel_tooltip()
         self.focus_set()
         cx, cy = self.canvasx(event.x), self.canvasy(event.y)
         action, target_id = self._get_target_action(cx, cy)
@@ -4480,7 +4606,7 @@ class EncoderApp:
                     self.log_text.see("end")
         except Exception: pass
         finally:
-            self.root.after(30, self._process_ui_queue)
+            self.root.after(50, self._process_ui_queue)
 
     def _apply_app_state(self, state):
         if state == "encoding":
@@ -4995,49 +5121,10 @@ class EncoderApp:
         if removed_count > 0: self.append_log(f"[INFO] Cleared {removed_count} queued item(s).\n")
 
     def _start_batch_tween(self):
-        if getattr(self, "batch_anim_job", None) is None:
-            self._last_batch_tween_time = time.perf_counter()
-            self._batch_tween_step()
+        pass
 
     def _batch_tween_step(self):
-        self.batch_anim_job = None
-        now = time.perf_counter()
-        dt = min(0.05, max(0.001, now - getattr(self, "_last_batch_tween_time", now)))
-        self._last_batch_tween_time = now
-
-        target = getattr(self, "batch_target_pct", 0.0)
-        cur = getattr(self, "batch_cur_pct", 0.0)
-        vel = getattr(self, "batch_velocity", 0.0)
-
-        still_animating = False
-        if abs(target - cur) > 0.04 or abs(vel) > 0.1:
-            omega = 2.0 / 0.22
-            x = omega * dt
-            exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x)
-            change = cur - target
-            temp = (vel + omega * change) * dt
-            new_vel = (vel - omega * temp) * exp
-            new_cur = target + (change + temp) * exp
-
-            if abs(target - new_cur) < 0.05 and abs(new_vel) < 0.2:
-                new_cur = target
-                new_vel = 0.0
-            else:
-                still_animating = True
-
-            self.batch_cur_pct = new_cur
-            self.batch_velocity = new_vel
-        elif cur != target:
-            self.batch_cur_pct = target
-            self.batch_velocity = 0.0
-
-        if hasattr(self, "batch_progress_bar"):
-            self.batch_progress_bar.set(max(0.0, min(1.0, self.batch_cur_pct / 100.0)))
-        if hasattr(self, "lbl_batch_pct"):
-            self.lbl_batch_pct.configure(text=f"{int(round(self.batch_cur_pct))}%")
-
-        if still_animating:
-            self.batch_anim_job = self.root.after(12, self._batch_tween_step)
+        pass
 
     def _update_queue_stats(self):
         with self.queue_lock:
@@ -5069,21 +5156,22 @@ class EncoderApp:
         else:
             target_p = min(100.0, max(0.0, (total_progress / total) * 100.0)) if total > 0 else 0.0
             self.batch_target_pct = target_p
-            if target_p < getattr(self, "batch_cur_pct", 0.0) - 4.0:
-                self.batch_cur_pct = target_p
-                self.batch_velocity = 0.0
-                if hasattr(self, "batch_progress_bar"):
-                    self.batch_progress_bar.set(target_p / 100.0)
-                if hasattr(self, "lbl_batch_pct"):
-                    self.lbl_batch_pct.configure(text=f"{int(round(target_p))}%")
-            self._start_batch_tween()
+            self.batch_cur_pct = target_p
+            if hasattr(self, "batch_progress_bar"):
+                new_p = max(0.0, min(1.0, target_p / 100.0))
+                if abs(self.batch_progress_bar.get() - new_p) > 0.001:
+                    self.batch_progress_bar.set(new_p)
+            new_pct_str = f"{int(round(target_p))}%"
+            if hasattr(self, "lbl_batch_pct") and self.lbl_batch_pct.cget("text") != new_pct_str:
+                self.lbl_batch_pct.configure(text=new_pct_str)
             txt = f"Batch: {completed}/{total} Completed"
             parts = []
             if running > 0: parts.append(f"{running} Active")
             if on_hold > 0: parts.append(f"{on_hold} On Hold")
             if queued > 0: parts.append(f"{queued} Queued")
             if parts: txt += " • " + " • ".join(parts)
-            self.lbl_batch_status.configure(text=txt)
+            if self.lbl_batch_status.cget("text") != txt:
+                self.lbl_batch_status.configure(text=txt)
             self._update_select_all_btn()
 
     def add_files_dialog(self):
@@ -5303,10 +5391,9 @@ class EncoderApp:
             return
         with self.queue_lock:
             queued_ids = {q["id"] for q in self.queue_items if q.get("status") == "queued"}
-        if queued_ids and self.selected_queue_ids == queued_ids:
-            self.btn_select_all.configure(text="Deselect All")
-        else:
-            self.btn_select_all.configure(text="Select All")
+        btn_txt = "Deselect All" if (queued_ids and self.selected_queue_ids == queued_ids) else "Select All"
+        if self.btn_select_all.cget("text") != btn_txt:
+            self.btn_select_all.configure(text=btn_txt)
 
     def _on_select_all_key(self, event=None):
         try:
