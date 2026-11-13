@@ -119,38 +119,6 @@ try:
 except ImportError:
     HAS_PIL = False
 
-try:
-    import ctypes
-    from ctypes import util
-    _cg_lib = ctypes.CDLL(util.find_library("CoreGraphics") or "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
-    _cg_lib.CGEventSourceFlagsState.restype = ctypes.c_uint64
-    _cg_lib.CGEventSourceFlagsState.argtypes = [ctypes.c_int32]
-except Exception:
-    _cg_lib = None
-
-try:
-    import ctypes
-    from ctypes import util
-    _carbon = ctypes.cdll.LoadLibrary(util.find_library("Carbon") or "/System/Library/Frameworks/Carbon.framework/Carbon")
-    _carbon.GetCurrentKeyModifiers.restype = ctypes.c_uint32
-    _carbon.GetCurrentKeyModifiers.argtypes = []
-except Exception:
-    _carbon = None
-
-def is_macos_option_held():
-    if _cg_lib:
-        try:
-            return bool((_cg_lib.CGEventSourceFlagsState(0) | _cg_lib.CGEventSourceFlagsState(1)) & 0x00080000)
-        except Exception:
-            pass
-    if _carbon:
-        try:
-            if bool(_carbon.GetCurrentKeyModifiers() & 0x4800):
-                return True
-        except Exception:
-            pass
-    return False
-
 _GLOBAL_APP_INSTANCE = None
 
 def safe_killpg(proc_or_pid, *sigs):
@@ -395,6 +363,7 @@ def get_common_resolution_label(width, height):
     except Exception:
         return ""
     mapping = {
+        (8192, 4320): "8K DCI", (4320, 8192): "Vertical 8K DCI",
         (7680, 4320): "8K UHD", (3840, 2160): "4K UHD", (4096, 2160): "DCI 4K",
         (2560, 1440): "2K QHD", (2048, 1080): "2K DCI", (1920, 1080): "Full HD 1080p",
         (1280, 720): "HD 720p", (720, 480): "NTSC 480p", (720, 576): "PAL 576p",
@@ -467,7 +436,20 @@ def get_frame_rate_mode(stream):
     r_str = stream.get("r_frame_rate", "")
     avg_str = stream.get("avg_frame_rate", "")
     if r_str and avg_str and r_str != "0/0" and avg_str != "0/0":
-        return "Constant (CFR)" if r_str == avg_str else "Variable (VFR)"
+        if r_str == avg_str:
+            return "Constant (CFR)"
+        try:
+            def _parse_fps(s):
+                if "/" in s:
+                    n, d = s.split("/", 1)
+                    return float(n) / float(d) if float(d) > 0 else 0.0
+                return float(s)
+            rf, af = _parse_fps(r_str), _parse_fps(avg_str)
+            if rf > 0 and af > 0:
+                return "Constant (CFR)" if abs(rf - af) < 0.05 else "Variable (VFR)"
+        except Exception:
+            pass
+        return "Variable (VFR)"
     return "Constant (CFR)"
 
 def calculate_bpp(bitrate, width, height, fps):
@@ -507,41 +489,51 @@ INSPECTOR_EXTENSIONS = (
     ".jpg", ".jpeg", ".png", ".tiff", ".webp", ".bmp", ".heic", ".exr"
 )
 
+_VT_PROBE_LOCK = threading.Lock()
 _VT_422_SUPPORT = None
 def check_vt_422_support():
     global _VT_422_SUPPORT
     if _VT_422_SUPPORT is not None:
         return _VT_422_SUPPORT
-    try:
-        ffmpeg_exec = find_binary("ffmpeg")
-        test_cmd = [
-            ffmpeg_exec, "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.04",
-            "-c:v", "hevc_videotoolbox", "-profile:v", "main42210",
-            "-pix_fmt", "p210le", "-allow_sw", "0", "-f", "null", "-"
-        ]
-        res = subprocess.run(test_cmd, capture_output=True, text=True, timeout=15)
-        _VT_422_SUPPORT = (res.returncode == 0)
-    except Exception:
-        _VT_422_SUPPORT = False
+    with _VT_PROBE_LOCK:
+        if _VT_422_SUPPORT is not None:
+            return _VT_422_SUPPORT
+        try:
+            ffmpeg_exec = find_binary("ffmpeg")
+            test_cmd = [
+                ffmpeg_exec, "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.12:r=25,format=p210le",
+                "-color_range", "tv", "-c:v", "hevc_videotoolbox", "-profile:v", "main42210",
+                "-pix_fmt", "p210le", "-allow_sw", "0", "-f", "null", "-"
+            ]
+            res = subprocess.run(test_cmd, capture_output=True, text=True, timeout=15)
+            if res.returncode != 0 and os.uname().machine == "arm64":
+                time.sleep(0.25)
+                res = subprocess.run(test_cmd, capture_output=True, text=True, timeout=15)
+            _VT_422_SUPPORT = (res.returncode == 0)
+        except Exception:
+            _VT_422_SUPPORT = False
     return _VT_422_SUPPORT
 
-HAS_VT_422 = check_vt_422_support()
-DEFAULT_CHROMA = "10-Bit 4:2:2" if HAS_VT_422 else "10-Bit 4:2:0"
+HAS_VT_422 = True
+DEFAULT_CHROMA = "10-Bit 4:2:2"
 
 _VT_SPATIAL_AQ_SUPPORT = None
 def check_vt_spatial_aq_support():
     global _VT_SPATIAL_AQ_SUPPORT
     if _VT_SPATIAL_AQ_SUPPORT is not None:
         return _VT_SPATIAL_AQ_SUPPORT
-    try:
-        ffmpeg_exec = find_binary("ffmpeg")
-        res = subprocess.run([ffmpeg_exec, "-h", "encoder=hevc_videotoolbox"], capture_output=True, text=True, timeout=15)
-        _VT_SPATIAL_AQ_SUPPORT = "spatial_aq" in (res.stdout + res.stderr)
-    except Exception:
-        _VT_SPATIAL_AQ_SUPPORT = False
+    with _VT_PROBE_LOCK:
+        if _VT_SPATIAL_AQ_SUPPORT is not None:
+            return _VT_SPATIAL_AQ_SUPPORT
+        try:
+            ffmpeg_exec = find_binary("ffmpeg")
+            res = subprocess.run([ffmpeg_exec, "-h", "encoder=hevc_videotoolbox"], capture_output=True, text=True, timeout=15)
+            _VT_SPATIAL_AQ_SUPPORT = "spatial_aq" in (res.stdout + res.stderr)
+        except Exception:
+            _VT_SPATIAL_AQ_SUPPORT = False
     return _VT_SPATIAL_AQ_SUPPORT
 
-HAS_VT_SPATIAL_AQ = check_vt_spatial_aq_support()
+HAS_VT_SPATIAL_AQ = True
 
 def get_default_presets():
     chroma = "10-Bit 4:2:2" if HAS_VT_422 else "10-Bit 4:2:0"
@@ -823,7 +815,9 @@ def get_settings_filename_tag(settings):
         clean_chroma = chroma.replace("-Bit", "bit").replace(":", "")
         parts.append(clean_chroma)
     res_tag = settings.get("resolution", "")
-    if "4K" in res_tag or "2160" in res_tag:
+    if "4K DCI" in res_tag or "4096" in res_tag:
+        parts.append("4K-DCI")
+    elif "4K" in res_tag or "2160" in res_tag:
         parts.append("4K")
     elif "1080" in res_tag:
         parts.append("1080p")
@@ -845,7 +839,10 @@ def get_settings_filename_tag(settings):
                 parts.append(f"CRF{crf_val}")
         except Exception:
             pass
-    if settings.get("denoise", False):
+    dn = settings.get("denoise", False)
+    if dn in ("light", "Denoise: Light"):
+        parts.append("NR-L")
+    elif dn:
         parts.append("NR")
     return " ".join(parts)
 
@@ -1074,7 +1071,11 @@ class SplitValueLabel(ctk.CTkFrame):
     def configure(self, **kwargs):
         if "text" in kwargs:
             txt = str(kwargs.pop("text"))
-            if " " in txt:
+            if " (" in txt:
+                parts = txt.split(" (", 1)
+                self.lbl_num.configure(text=parts[0])
+                self.lbl_desc.configure(text="(" + parts[1])
+            elif " " in txt:
                 parts = txt.split(" ", 1)
                 self.lbl_num.configure(text=parts[0])
                 self.lbl_desc.configure(text=parts[1])
@@ -1129,12 +1130,15 @@ class QuartzActiveJobsCanvas(tk.Canvas):
         self.on_job_done_ui = on_job_done_ui
         self._anim_job = None
         self._last_tween_time = 0.0
+        self.is_paused = False
         self.scroller = QuartzKineticScroller(
             get_view_metrics=self._get_scroll_metrics,
             set_view_fraction=self.yview_moveto,
             after_fn=self.after,
             cancel_after_fn=self.after_cancel
         )
+        self._font_title = tkfont.Font(family="SF Pro Text", size=10, weight="bold")
+        self._font_metrics = tkfont.Font(family="SF Mono", size=9)
         self.bind("<Configure>", self._on_resize)
 
     def _get_scroll_metrics(self):
@@ -1151,6 +1155,12 @@ class QuartzActiveJobsCanvas(tk.Canvas):
 
     def handle_wheel_input(self, delta_input):
         self.scroller.handle_wheel_input(delta_input)
+
+    def set_paused(self, paused):
+        paused = bool(paused)
+        if self.is_paused != paused:
+            self.is_paused = paused
+            self.redraw_all()
 
     def _get_progress_color(self):
         """Generates a soft, faded accent tint (20% opacity blend over #161616) ensuring high text contrast."""
@@ -1300,7 +1310,11 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             self.redraw_all()
 
         if still_animating:
-            self._anim_job = self.after(40, self._tween_step)
+            is_exit_anim = any(
+                self.jobs.get(iid, {}).get("state") in ("holding", "fading")
+                for iid in self.job_order
+            )
+            self._anim_job = self.after(16 if is_exit_anim else 33, self._tween_step)
 
     def _update_job_pbar(self, item_id, pct):
         job = self.jobs.get(item_id)
@@ -1313,16 +1327,22 @@ class QuartzActiveJobsCanvas(tk.Canvas):
         pts, stroke_w = self._get_progress_rect_params(x1, y1, x2, y2, fill_x, radius=rad)
         tag = f"pbar_fill_{item_id}"
         if not pts:
-            try:
-                self.itemconfigure(tag, state="hidden")
-            except tk.TclError:
-                pass
+            if not job.get("_last_pbar_hidden", False):
+                try:
+                    self.itemconfigure(tag, state="hidden")
+                    job["_last_pbar_hidden"] = True
+                    job["_last_fill_x"] = -999.0
+                except tk.TclError:
+                    pass
             return
         try:
             is_done = (job.get("is_complete", False) or job.get("is_done_ui", False)) and (pct >= 99.95)
             alpha = job.get("alpha", 1.0)
-            p_col = blend_hex(DONE_BG, CARD_BG, alpha) if is_done else blend_hex(self._get_progress_color(), CARD_BG, alpha)
-            if not self.find_withtag(tag):
+            p_col = blend_hex(DONE_BG, CARD_BG, alpha) if is_done else blend_hex(HOLD_BG if self.is_paused else self._get_progress_color(), CARD_BG, alpha)
+            exists = job.get("_pbar_exists")
+            if exists is None:
+                exists = bool(self.find_withtag(tag))
+            if not exists:
                 self.create_polygon(
                     pts, fill=p_col, outline=p_col, width=stroke_w,
                     joinstyle=tk.ROUND, state="normal",
@@ -1333,16 +1353,27 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                 for text_tag in (f"title_{item_id}", f"metrics_{item_id}", f"pct_{item_id}"):
                     if self.find_withtag(text_tag):
                         self.tag_raise(text_tag)
+                job["_pbar_exists"] = True
+                job["_last_fill_x"] = fill_x
+                job["_last_pbar_col"] = p_col
+                job["_last_pbar_hidden"] = False
             else:
-                self.coords(tag, *pts)
-                if job.get("_last_pbar_col") != p_col:
+                last_fx = job.get("_last_fill_x", -999.0)
+                was_hidden = job.get("_last_pbar_hidden", False)
+                if abs(fill_x - last_fx) >= 1.0 or was_hidden or (is_done and last_fx < x2 - 0.5):
+                    self.coords(tag, *pts)
+                    job["_last_fill_x"] = fill_x
+                if job.get("_last_pbar_col") != p_col or was_hidden:
                     self.itemconfigure(tag, fill=p_col, outline=p_col, width=stroke_w, joinstyle=tk.ROUND, state="normal")
                     job["_last_pbar_col"] = p_col
+                    job["_last_pbar_hidden"] = False
 
             disp_pct_str = f"{min(99.9, pct):.1f}%" if not is_done else "100%"
-            pct_col = blend_hex(DONE_GREEN if is_done else ULTRA_TEXT, CARD_BG, alpha)
-            if self.itemcget(f"pct_{item_id}", "text") != disp_pct_str:
+            pct_col = blend_hex(DONE_GREEN if is_done else (HOLD_TEXT if self.is_paused else ULTRA_TEXT), CARD_BG, alpha)
+            if job.get("_last_disp_pct") != disp_pct_str or job.get("_last_pct_col") != pct_col:
                 self.itemconfig(f"pct_{item_id}", text=disp_pct_str, fill=pct_col)
+                job["_last_disp_pct"] = disp_pct_str
+                job["_last_pct_col"] = pct_col
         except tk.TclError:
             pass
 
@@ -1372,15 +1403,24 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             job["cur_pct"] = target_p
             job["velocity"] = 0.0
             self._update_job_pbar(item_id, target_p)
-        if "old_metrics" not in job:
+        if not job.get("is_complete") and not job.get("is_done_ui"):
             job["old_metrics"] = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
-        if "done_metrics" not in job:
             job["done_metrics"] = f"{clean_t}  •  Completed" if clean_t else "Completed"
         if not job.get("is_done_ui"):
-            metrics_txt = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
-            if self.itemcget(f"metrics_{item_id}", "text") != metrics_txt:
-                self.itemconfig(f"metrics_{item_id}", text=metrics_txt)
-        self._start_tween()
+            metrics_txt = f"{clean_t}  •  Paused" if self.is_paused else f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
+            if job.get("_last_metrics_txt") != metrics_txt:
+                try:
+                    if self.find_withtag(f"metrics_{item_id}"):
+                        self.itemconfig(f"metrics_{item_id}", text=metrics_txt)
+                        job["_last_metrics_txt"] = metrics_txt
+                except tk.TclError:
+                    pass
+        if abs(target_p - job.get("cur_pct", 0.0)) >= 0.08 or self._anim_job is not None:
+            self._start_tween()
+        else:
+            job["cur_pct"] = target_p
+            job["velocity"] = 0.0
+            self._update_job_pbar(item_id, target_p)
 
     def end_job(self, item_id, completed=True):
         job = self.jobs.get(item_id)
@@ -1404,10 +1444,8 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             clean_s = job.get("s_str", "")
             clean_f = job.get("f_str", "")
             clean_eta = job.get("eta_str", "")
-            if "old_metrics" not in job:
-                job["old_metrics"] = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {clean_eta}" if (clean_s or clean_f) else (f"{clean_t}  •  Completed" if clean_t else "Completed")
-            if "done_metrics" not in job:
-                job["done_metrics"] = f"{clean_t}  •  Completed" if clean_t else "Completed"
+            job["old_metrics"] = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {clean_eta}" if (clean_s or clean_f) else (f"{clean_t}  •  Completed" if clean_t else "Completed")
+            job["done_metrics"] = f"{clean_t}  •  Completed" if clean_t else "Completed"
             job["state"] = "holding"
             job["hold_duration"] = 0.85
             job["exit_duration"] = 0.38
@@ -1529,6 +1567,8 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             is_comp = (job.get("is_complete", False) or job.get("is_done_ui", False)) and (cur_pct >= 99.95)
             if is_comp:
                 p_col = blend_hex(DONE_BG, bg_target, alpha)
+            elif self.is_paused:
+                p_col = blend_hex(HOLD_BG, bg_target, alpha)
             else:
                 p_col = blend_hex(base_p_col, bg_target, alpha)
 
@@ -1555,6 +1595,13 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                 state="normal" if pts else "hidden",
                 tags=("pbar_fill", f"pbar_fill_{iid}")
             )
+            job["_pbar_exists"] = True
+            job["_last_fill_x"] = fill_x if pts else -999.0
+            job["_last_pbar_hidden"] = (not pts)
+            job["_last_pbar_col"] = p_col
+            job.pop("_last_disp_pct", None)
+            job.pop("_last_pct_col", None)
+            job.pop("_last_metrics_txt", None)
 
             # 4. Text & Metrics drawn on top, vertically centered
             if alpha > 0.12 and card_h > 12:
@@ -1563,12 +1610,14 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                 disp_pct = cur_pct if not is_comp else 100.0
                 cy = (y1 + y2) / 2
 
-                pct_col_raw = DONE_GREEN if is_comp else ULTRA_TEXT
+                pct_col_raw = DONE_GREEN if is_comp else (HOLD_TEXT if self.is_paused else ULTRA_TEXT)
                 pct_col = blend_hex(pct_col_raw, bg_target, alpha)
                 pct_x = x2 - 12
                 metrics_x = pct_x - 52
                 disp_pct_str = "100%" if is_comp else f"{disp_pct:.1f}%"
                 self.create_text(pct_x, cy, text=disp_pct_str, fill=pct_col, anchor="e", font=("SF Pro Text", 10, "bold"), tags=("pct", f"pct_{iid}"))
+                job["_last_disp_pct"] = disp_pct_str
+                job["_last_pct_col"] = pct_col
 
                 if is_comp:
                     if "metrics_fade_start" in job:
@@ -1586,14 +1635,31 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                         metrics_txt = f"{clean_t}  •  Completed" if clean_t else "Completed"
                         metrics_col = blend_hex("#9ea8ad", bg_target, alpha)
                 else:
-                    metrics_txt = f"{job.get('t_str')}  •  {job.get('s_str')}  •  {job.get('f_str')}  •  {job.get('eta_str')}"
-                    metrics_col = blend_hex("#9ea8ad", bg_target, alpha)
+                    if self.is_paused:
+                        clean_t = job.get("t_str", "")
+                        metrics_txt = f"{clean_t}  •  Paused" if clean_t else "Paused"
+                        metrics_col = blend_hex(HOLD_TEXT, bg_target, alpha)
+                    else:
+                        metrics_txt = f"{job.get('t_str')}  •  {job.get('s_str')}  •  {job.get('f_str')}  •  {job.get('eta_str')}"
+                        metrics_col = blend_hex("#9ea8ad", bg_target, alpha)
                 self.create_text(metrics_x, cy, text=metrics_txt, fill=metrics_col, anchor="e", font=("SF Mono", 9), tags=("metrics", f"metrics_{iid}"))
 
                 title_col = blend_hex(TEXT_PRIMARY, bg_target, alpha)
-                avail_w = max(60, (metrics_x - 10) - (x1 + 12) - 150)
-                max_chars = max(10, int(avail_w / 7.2))
-                disp_title = raw_title[:max_chars - 3] + "..." if len(raw_title) > max_chars else raw_title
+                metrics_w = max(self._font_metrics.measure(metrics_txt), 230)
+                avail_w = max(40, (metrics_x - metrics_w - 14) - (x1 + 12))
+                if self._font_title.measure(raw_title) <= avail_w:
+                    disp_title = raw_title
+                else:
+                    ell = "..."
+                    ell_w = self._font_title.measure(ell)
+                    lo, hi = 0, len(raw_title)
+                    while lo < hi:
+                        mid = (lo + hi + 1) // 2
+                        if self._font_title.measure(raw_title[:mid]) + ell_w <= avail_w:
+                            lo = mid
+                        else:
+                            hi = mid - 1
+                    disp_title = raw_title[:max(1, lo)] + ell
                 self.create_text(x1 + 12, cy, text=disp_title, fill=title_col, anchor="w", font=("SF Pro Text", 10, "bold"), tags=("title", f"title_{iid}"))
 
         if not self.scroller.is_animating:
@@ -1629,16 +1695,16 @@ class QuartzQueueCanvas(tk.Canvas):
     ROW_STEP = 40
     GRAD_H = 36
 
-    def __init__(self, master, on_remove_item=None, on_inspect_item=None, on_select_item=None, **kwargs):
+    def __init__(self, master, on_remove_item=None, on_inspect_item=None, on_select_item=None, on_reveal_item=None, **kwargs):
         super().__init__(master, bg=CARD_BG, bd=0, highlightthickness=0, relief="flat", **kwargs)
         self.on_remove_item = on_remove_item
         self.on_inspect_item = on_inspect_item
         self.on_select_item = on_select_item
+        self.on_reveal_item = on_reveal_item
         self.selected_ids = set()
         self.items = []
         self.item_map = {}
         self.rendered_rows = {}  # maps idx -> item_id
-        self.is_option_mode = False
         self._external_yscrollcommand = None
         self._updating_viewport = False
         self._grad_top_photo = None
@@ -1661,10 +1727,12 @@ class QuartzQueueCanvas(tk.Canvas):
         self._tooltip_after_id = None
         self.hovered_del_id = None
         self.hovered_info_id = None
+        self.hovered_reveal_id = None
         self.bind("<Configure>", self._on_resize)
         self.bind("<Motion>", self._on_mouse_move)
         self.bind("<Leave>", self._on_mouse_leave)
         self.bind("<Button-1>", self._on_click)
+        self.bind("<Double-Button-1>", self._on_double_click)
         self.bind("<Destroy>", lambda e: self._destroy_tooltip() if e.widget is self else None)
 
     def _get_bg_rgb(self):
@@ -1782,13 +1850,6 @@ class QuartzQueueCanvas(tk.Canvas):
     def handle_wheel_input(self, delta_input):
         self.scroller.handle_wheel_input(delta_input)
 
-    def set_option_mode(self, enabled):
-        if getattr(self, "is_option_mode", False) != enabled:
-            self.is_option_mode = enabled
-            if len(self.items) == 0 and self.find_withtag("placeholder"):
-                txt = "Drop a file to inspect metadata" if enabled else "Drop files or folders anywhere to start encode"
-                self.itemconfig("placeholder", text=txt)
-
     def set_items(self, items):
         self._cancel_tooltip()
         self.items = list(items)
@@ -1868,8 +1929,7 @@ class QuartzQueueCanvas(tk.Canvas):
                 self.rendered_rows.clear()
                 self._clear_gradients()
                 h = max(100, self.winfo_height())
-                placeholder_text = "Drop a file to inspect metadata" if getattr(self, "is_option_mode", False) else "Drop files or folders anywhere to start encode"
-                self.create_text(w / 2, h / 2, text=placeholder_text, fill=TEXT_MUTED, font=("SF Pro Text", 11), tags="placeholder")
+                self.create_text(w / 2, h / 2, text="Drop files or folders anywhere to start encode", fill=TEXT_MUTED, font=("SF Pro Text", 11), tags="placeholder")
                 if not self.scroller.is_animating:
                     self.scroller.sync_position()
                 return
@@ -1937,7 +1997,9 @@ class QuartzQueueCanvas(tk.Canvas):
         pt = item.get("progress_text")
         if status == "encoding": bg_col, out_col, txt_col, txt = ULTRA_BG, ULTRA_BORDER, ULTRA_TEXT, (f"ENCODING {pt}" if pt else "ENCODING")
         elif status == "suspended": bg_col, out_col, txt_col, txt = HOLD_BG, HOLD_BORDER, HOLD_TEXT, (f"ON HOLD {pt}" if pt else "ON HOLD")
-        elif status == "completed": bg_col, out_col, txt_col, txt = DONE_BG, DONE_BORDER, DONE_GREEN, "DONE"
+        elif status == "completed":
+            is_rev_h = (iid == getattr(self, "hovered_reveal_id", None)) and bool(item.get("output_path"))
+            bg_col, out_col, txt_col, txt = ("#103824", DONE_GREEN, DONE_GREEN, "REVEAL") if is_rev_h else (DONE_BG, DONE_BORDER, DONE_GREEN, "DONE")
         elif status == "failed": bg_col, out_col, txt_col, txt = "#450a0a", "#7f1d1d", "#f87171", "FAILED"
         elif status == "cancelled": bg_col, out_col, txt_col, txt = HOLD_BG, HOLD_BORDER, HOLD_TEXT, "SKIPPED"
         elif is_sel: bg_col, out_col, txt_col, txt = ULTRA_BG, ULTRA_BORDER, ULTRA_TEXT, "SELECTED"
@@ -1975,7 +2037,9 @@ class QuartzQueueCanvas(tk.Canvas):
             if st.get("chroma"):
                 s_parts.append(st["chroma"])
             r_tag = st.get("resolution", "")
-            if "4K" in r_tag or "2160" in r_tag:
+            if "4K DCI" in r_tag or "4096" in r_tag:
+                s_parts.append("4K DCI")
+            elif "4K" in r_tag or "2160" in r_tag:
                 s_parts.append("4K")
             elif "1080" in r_tag:
                 s_parts.append("1080p")
@@ -2000,7 +2064,10 @@ class QuartzQueueCanvas(tk.Canvas):
                         s_parts.append(f"CRF {crf_disp}")
                 except Exception:
                     pass
-            if st.get("denoise"):
+            dn = st.get("denoise")
+            if dn in ("light", "Denoise: Light"):
+                s_parts.append("NR-L")
+            elif dn:
                 s_parts.append("NR")
         settings_str = " • ".join(s_parts)
 
@@ -2094,9 +2161,12 @@ class QuartzQueueCanvas(tk.Canvas):
             is_finished = status in ("completed", "failed", "cancelled")
             w = max(200, self.winfo_width())
             x2 = w - 6
-            b_x1 = (x2 - 10) - 95
+            b_x2 = x2 - 10
+            b_x1 = b_x2 - 95
             y1 = idx * self.ROW_STEP + 4
             btn_cy = (y1 + y1 + self.ROW_H) / 2
+            if status == "completed" and item.get("output_path") and (b_x1 <= canvas_x <= b_x2) and (btn_cy - 11 <= canvas_y <= btn_cy + 11):
+                return "reveal", item["id"]
             info_cx = b_x1 - 18
             if not is_finished:
                 btn_cx = info_cx - 28
@@ -2210,7 +2280,16 @@ class QuartzQueueCanvas(tk.Canvas):
     def _on_mouse_move(self, event):
         cx, cy = self.canvasx(event.x), self.canvasy(event.y)
         action, target_id = self._get_target_action(cx, cy)
-        self.configure(cursor="hand2" if action in ("delete", "info") else "")
+        self.configure(cursor="hand2" if action in ("delete", "info", "reveal") else "")
+
+        rev_target = target_id if action == "reveal" else None
+        if rev_target != self.hovered_reveal_id:
+            old_rev = self.hovered_reveal_id
+            self.hovered_reveal_id = rev_target
+            if old_rev:
+                self._redraw_row(old_rev)
+            if rev_target:
+                self._redraw_row(rev_target)
 
         hover_row_id = target_id if action == "select" else None
         if hover_row_id != self._tooltip_row_id:
@@ -2254,6 +2333,10 @@ class QuartzQueueCanvas(tk.Canvas):
             self.itemconfig(f"info_btn_{self.hovered_info_id}", fill="#1c1c1c", outline="")
             self.itemconfig(f"info_txt_{self.hovered_info_id}", fill="#707070")
             self.hovered_info_id = None
+        if self.hovered_reveal_id:
+            old_rev = self.hovered_reveal_id
+            self.hovered_reveal_id = None
+            self._redraw_row(old_rev)
 
     def _on_click(self, event):
         self._cancel_tooltip()
@@ -2264,10 +2347,20 @@ class QuartzQueueCanvas(tk.Canvas):
             self.on_remove_item(target_id)
         elif action == "info" and self.on_inspect_item:
             self.on_inspect_item(target_id)
+        elif action == "reveal" and self.on_reveal_item:
+            self.on_reveal_item(target_id)
         elif action == "select" and self.on_select_item:
             self.on_select_item(target_id, event)
         elif action is None and self.on_select_item:
             self.on_select_item(None, event)
+
+    def _on_double_click(self, event):
+        cx, cy = self.canvasx(event.x), self.canvasy(event.y)
+        action, target_id = self._get_target_action(cx, cy)
+        if target_id and action in ("select", "reveal"):
+            item = self.item_map.get(target_id)
+            if item and item.get("status") == "completed" and item.get("output_path") and self.on_reveal_item:
+                self.on_reveal_item(target_id)
 
 # ============================================================
 class UniversalScrollHandler:
@@ -2383,6 +2476,7 @@ class EncoderApp:
         self.active_processes = {}
         self.running_ids = set()
         self.suspended_ids = set()
+        self.item_hold_state = {}
         self.cancelled_ids = set()
         self.retrying_ids = set()
         self.active_output_files = {}
@@ -2408,11 +2502,15 @@ class EncoderApp:
         self.batch_velocity = 0.0
         self.batch_anim_job = None
         self._last_batch_tween_time = 0.0
+        self._batch_start_time = None
+        self._batch_orig_bytes = 0
+        self._batch_new_bytes = 0
+        self._batch_completed_count = 0
+        self._last_batch_summary = None
 
         # Media Inspector Cache
         self.inspected_data = None
         self.inspected_path = None
-        self.raw_json_mode = False
         self._startup_time = time.time()
 
         self.setup_ui()
@@ -2426,11 +2524,6 @@ class EncoderApp:
         self.root.bind_all("<KP_Delete>", self._on_delete_key, add="+")
         self.root.bind_all("<Command-a>", self._on_select_all_key, add="+")
         self.root.bind_all("<Control-a>", self._on_select_all_key, add="+")
-
-        self._option_key_pressed = False
-        self.root.bind_all("<KeyPress>", self._on_key_press_option, add="+")
-        self.root.bind_all("<KeyRelease>", self._on_key_release_option, add="+")
-        self.root.after(60, self._poll_option_key)
 
         self.root.after(100, self.preflight_check)
         self.root.after(30, self._process_ui_queue)
@@ -2589,6 +2682,7 @@ class EncoderApp:
                             safe_killpg(proc, signal.SIGSTOP)
                         self.running_ids.discard(rid)
                         self.suspended_ids.add(rid)
+                        self._update_item_hold_clock(rid)
                         current_units = max(0, current_units - w)
                         if is8:
                             current_8k = max(0, current_8k - 1)
@@ -2614,6 +2708,7 @@ class EncoderApp:
                         if proc and proc.poll() is None:
                             safe_killpg(proc, signal.SIGCONT)
                         self.suspended_ids.discard(wid)
+                        self._update_item_hold_clock(wid)
                         self.running_ids.add(wid)
                         current_units += w
                         if is8:
@@ -2688,8 +2783,8 @@ class EncoderApp:
             self.switch_auto_start.configure(progress_color=ULTRA_BG, button_color=ULTRA_TEXT, button_hover_color=ULTRA_TEXT_HOVER)
         if hasattr(self, "cb_tag_settings"):
             self.cb_tag_settings.configure(fg_color=ULTRA_BG, hover_color=ULTRA_BG_HOVER, border_color=ULTRA_BORDER, checkmark_color=ULTRA_TEXT)
-        if hasattr(self, "cb_denoise"):
-            self.cb_denoise.configure(fg_color=ULTRA_BG, hover_color=ULTRA_BG_HOVER, border_color=ULTRA_BORDER, checkmark_color=ULTRA_TEXT)
+        if hasattr(self, "denoise_cb"):
+            self._style_denoise_menu()
         self.update_action_button_ui()
         self.update_settings_header_label()
         if hasattr(self, "active_jobs_canvas"):
@@ -2707,7 +2802,7 @@ class EncoderApp:
                 if isinstance(child, ctk.CTkTextbox):
                     mtb = getattr(child, "_textbox", child)
                     try:
-                        mtb.tag_configure("sec_h", foreground=TEXT_PRIMARY)
+                        mtb.tag_configure("sec_h", foreground=ULTRA_TEXT)
                         mtb.tag_configure("bullet", foreground=ULTRA_TEXT)
                     except Exception:
                         pass
@@ -2724,7 +2819,7 @@ class EncoderApp:
         self.append_log(f"[INFO] Highlight color reset to default ({DEFAULT_THEME_COLOR}).\n")
 
     def _on_theme_dot_click(self, event=None):
-        if event and self.is_option_held(event):
+        if event and isinstance(getattr(event, "state", 0), int) and (event.state & 0x18):
             self.reset_default_theme_color()
         else:
             self.pick_custom_theme_color()
@@ -2748,7 +2843,8 @@ class EncoderApp:
                 s_parts.append(self.chroma_var.get())
             if hasattr(self, "resolution_var"):
                 r_v = self.resolution_var.get()
-                if "4K" in r_v or "2160" in r_v: s_parts.append("4K")
+                if "4K DCI" in r_v or "4096" in r_v: s_parts.append("4K DCI")
+                elif "4K" in r_v or "2160" in r_v: s_parts.append("4K")
                 elif "1080" in r_v: s_parts.append("1080p")
                 elif "720" in r_v: s_parts.append("720p")
             if hasattr(self, "framerate_var"):
@@ -2762,8 +2858,10 @@ class EncoderApp:
             if hasattr(self, "quality_slider"):
                 q = int(round(float(self.quality_slider.get())))
                 s_parts.append(f"Q{q}" if enc == "AppleMediaEngine" else f"CRF {q}")
-            if hasattr(self, "cb_denoise") and bool(self.cb_denoise.get()):
-                s_parts.append("NR")
+            if hasattr(self, "denoise_var"):
+                dv = self.denoise_var.get()
+                if dv == "Denoise: Light": s_parts.append("NR-L")
+                elif dv == "Denoise: Full": s_parts.append("NR")
             return " • ".join(s_parts)
         except Exception:
             return ""
@@ -2809,10 +2907,34 @@ class EncoderApp:
         self.save_tag_settings(val)
         self.apply_settings_to_selected()
 
-    def toggle_denoise(self):
+    def _denoise_val_to_label(self, val):
+        if val in ("light", "Denoise: Light"):
+            return "Denoise: Light"
+        elif val in (True, "full", "Denoise: Full", "standard"):
+            return "Denoise: Full"
+        return "Denoise: Off"
+
+    def _denoise_label_to_val(self, lbl):
+        if lbl == "Denoise: Light":
+            return "light"
+        elif lbl == "Denoise: Full":
+            return True
+        return False
+
+    def _style_denoise_menu(self):
+        if not hasattr(self, "denoise_cb") or not hasattr(self, "denoise_var"):
+            return
+        is_on = (self.denoise_var.get() != "Denoise: Off")
+        self.denoise_cb.configure(
+            fg_color=ULTRA_BG if is_on else "#1a1a1a",
+            button_color=ULTRA_BORDER if is_on else "#242424",
+            button_hover_color=ULTRA_BG_HOVER if is_on else "#2e2e2e",
+            text_color=ULTRA_TEXT if is_on else TEXT_MUTED
+        )
+
+    def on_denoise_change(self, choice=None):
+        self._style_denoise_menu()
         self.mark_custom_settings()
-        self.apply_settings_to_selected()
-        self.update_settings_summary()
 
     def update_settings_header_label(self):
         if not hasattr(self, "lbl_settings_toggle"):
@@ -2953,6 +3075,7 @@ class EncoderApp:
         except Exception as e: self.append_log(f"[ERROR] Presets write error: {e}\n")
 
     def kill_own_processes(self):
+        threads_to_join = []
         with self.process_lock:
             self.cancel_requested = True
             procs = list(self.active_processes.values())
@@ -2969,25 +3092,27 @@ class EncoderApp:
             self.active_processes.clear()
             self.running_ids.clear()
             self.suspended_ids.clear()
-            for t in [t for t in getattr(self, "worker_threads", []) if t.is_alive()]:
-                try:
-                    t.join(timeout=0.5)
-                except Exception: pass
+            threads_to_join = [t for t in getattr(self, "worker_threads", []) if t.is_alive()]
             self.worker_threads = []
-            for out_f, lk_f in list(getattr(self, "active_output_files", {}).values()):
-                if out_f and os.path.exists(out_f):
-                    try:
-                        os.remove(out_f)
-                    except OSError: pass
-                release_output_path(lk_f)
+            out_items = list(getattr(self, "active_output_files", {}).values())
             if hasattr(self, "active_output_files"):
                 self.active_output_files.clear()
+        for t in threads_to_join:
+            try:
+                t.join(timeout=0.5)
+            except Exception: pass
+        for out_f, lk_f in out_items:
+            if out_f and os.path.exists(out_f):
+                try:
+                    os.remove(out_f)
+                except OSError: pass
+            release_output_path(lk_f)
         cleanup_system_ffmpeg(force_all=True)
 
     def on_close(self):
-        if hasattr(self, "preset_var") and self.preset_var.get() == "Custom":
+        if hasattr(self, "preset_var") and self.preset_var.get() == "Custom" and not getattr(self, "selected_queue_ids", None):
             self.mark_custom_settings()
-        with self.process_lock: has_running = bool(self.active_processes)
+        with self.process_lock: has_running = bool(self.active_processes or self.retrying_ids or self.suspended_ids)
         if self.is_running and has_running:
             if messagebox.askyesno("Quit MediaEngine", "Encodes are in progress. Stop them and quit?"):
                 self.cancel_requested = True
@@ -3000,20 +3125,6 @@ class EncoderApp:
             self.root.destroy()
 
     def preflight_check(self):
-        global HAS_VT_422, HAS_VT_SPATIAL_AQ, DEFAULT_CHROMA
-        cleanup_system_ffmpeg(force_all=False)
-        HAS_VT_422 = check_vt_422_support()
-        DEFAULT_CHROMA = "10-Bit 4:2:2" if HAS_VT_422 else "10-Bit 4:2:0"
-        HAS_VT_SPATIAL_AQ = check_vt_spatial_aq_support()
-        if not HAS_VT_422:
-            for p in self.presets.values():
-                if isinstance(p, dict) and p.get("chroma") == "10-Bit 4:2:2":
-                    p["chroma"] = "10-Bit 4:2:0"
-            self.sync_encoder_ui()
-            self.update_settings_summary()
-            self.append_log("[INFO] Hardware 10-Bit 4:2:2 is not supported on this Mac tier. Defaulted to 10-Bit 4:2:0.\n")
-        if not HAS_VT_SPATIAL_AQ:
-            self.append_log("[INFO] FFmpeg build does not support -spatial_aq. Spatial AQ disabled.\n")
         missing = []
         if not os.path.exists(FFMPEG_BIN) and not shutil.which("ffmpeg"): missing.append("ffmpeg")
         if not os.path.exists(FFPROBE_BIN) and not shutil.which("ffprobe"): missing.append("ffprobe")
@@ -3022,6 +3133,33 @@ class EncoderApp:
             messagebox.showwarning("Encoder Notice", msg)
             self.append_log(f"[WARNING] {msg}\n")
         self.append_log(f"[INFO] Hardware detected: {self.chip_name} ({self.engine_multiplier} video encode engine{'s' if self.engine_multiplier > 1 else ''}).\n")
+
+        def _bg_probe():
+            global HAS_VT_422, HAS_VT_SPATIAL_AQ, DEFAULT_CHROMA
+            cleanup_system_ffmpeg(force_all=False)
+            vt_422 = check_vt_422_support()
+            vt_aq = check_vt_spatial_aq_support()
+            HAS_VT_422 = vt_422
+            DEFAULT_CHROMA = "10-Bit 4:2:2" if vt_422 else "10-Bit 4:2:0"
+            HAS_VT_SPATIAL_AQ = vt_aq
+
+            def _apply_probe_results():
+                if not vt_422:
+                    for p in self.presets.values():
+                        if isinstance(p, dict) and p.get("chroma") == "10-Bit 4:2:2":
+                            p["chroma"] = "10-Bit 4:2:0"
+                    self.sync_encoder_ui()
+                    self.update_settings_summary()
+                    self.append_log("[INFO] Hardware 10-Bit 4:2:2 is unavailable in VideoToolbox on this system. Defaulted to 10-Bit 4:2:0.\n")
+                if not vt_aq:
+                    self.append_log("[INFO] FFmpeg build does not support -spatial_aq. Spatial AQ disabled.\n")
+
+            try:
+                self.root.after(0, _apply_probe_results)
+            except Exception:
+                pass
+
+        threading.Thread(target=_bg_probe, daemon=True).start()
 
 
     def setup_ui(self):
@@ -3157,9 +3295,9 @@ class EncoderApp:
         ctk.CTkLabel(r_res, text="Resolution", width=65, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")).pack(side="left")
         self.resolution_var = ctk.StringVar(value="Original")
         self.resolution_cb = ctk.CTkOptionMenu(
-            r_res, values=["Original", "4K UHD (2160p)", "1080p (Full HD)", "720p (HD)"],
+            r_res, values=["Original", "4K DCI (4096x2160)", "4K UHD (2160p)", "1080p (Full HD)", "720p (HD)"],
             variable=self.resolution_var, command=lambda v: self.mark_custom_settings(),
-            width=135, height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
+            width=155, height=30, corner_radius=8, fg_color="#1a1a1a", button_color="#242424", button_hover_color="#2e2e2e",
             font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), dropdown_font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold")
         )
         self.resolution_cb.pack(side="left", padx=(0, 10))
@@ -3190,7 +3328,7 @@ class EncoderApp:
         self.lbl_quality_title = ctk.CTkLabel(r_quality, text="Quality", width=65, anchor="w", font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"))
         self.lbl_quality_title.pack(side="left")
         self.lbl_quality_val = SplitValueLabel(r_quality, width=255)
-        self.lbl_quality_val.configure(text="69 (Master)")
+        self.lbl_quality_val.configure(text="69 (High)")
         self.lbl_quality_val.pack(side="right")
         self.lbl_quality_val.bind("<Button-1>", lambda e: self.edit_quality_dialog())
         btn_q_minus = ctk.CTkButton(r_quality, text="−", width=22, height=22, corner_radius=6, fg_color="transparent", hover_color=ULTRA_BG, text_color=TEXT_PRIMARY, font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), command=lambda: self.step_quality(-1))
@@ -3265,19 +3403,17 @@ class EncoderApp:
         else:
             self.cb_tag_settings.deselect()
         self.cb_tag_settings.pack(side="right")
-        self.cb_denoise = ctk.CTkCheckBox(
-            r4, text="Adaptive Denoise",
+        self.denoise_var = ctk.StringVar(value="Denoise: Full")
+        self.denoise_cb = ctk.CTkOptionMenu(
+            r4, values=["Denoise: Off", "Denoise: Light", "Denoise: Full"],
+            variable=self.denoise_var, command=self.on_denoise_change,
+            width=132, height=30, corner_radius=8,
+            fg_color=ULTRA_BG, button_color=ULTRA_BORDER, button_hover_color=ULTRA_BG_HOVER,
+            text_color=ULTRA_TEXT,
             font=ctk.CTkFont(family="SF Pro Text", size=12, weight="bold"),
-            text_color=TEXT_PRIMARY,
-            fg_color=ULTRA_BG,
-            hover_color=ULTRA_BG_HOVER,
-            border_color=ULTRA_BORDER,
-            checkmark_color=ULTRA_TEXT,
-            corner_radius=4,
-            width=18, height=18, checkbox_width=18, checkbox_height=18,
-            command=self.toggle_denoise
+            dropdown_font=ctk.CTkFont(family="SF Pro Text", size=12, weight="bold")
         )
-        self.cb_denoise.pack(side="right", padx=(0, 12))
+        self.denoise_cb.pack(side="right", padx=(0, 10))
         browse_btn = ctk.CTkButton(r4, text="Browse", width=66, height=30, corner_radius=8, fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER, font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"), command=self.browse_dest)
         browse_btn.pack(side="right", padx=(0, 10))
         self.dest_entry = ctk.CTkEntry(r4, textvariable=self.dest_var, height=30, corner_radius=8, fg_color="#1a1a1a", border_width=0, font=ctk.CTkFont(family="SF Pro Text", size=13))
@@ -3429,7 +3565,8 @@ class EncoderApp:
             queue_wrap,
             on_remove_item=self.remove_or_cancel_item,
             on_inspect_item=self.inspect_queued_item,
-            on_select_item=self.on_queue_item_selected
+            on_select_item=self.on_queue_item_selected,
+            on_reveal_item=self.reveal_completed_item
         )
         self.canvas_queue.pack(side="left", fill="both", expand=True, padx=(0, 4), pady=2)
         self.queue_scrollbar = ctk.CTkScrollbar(queue_wrap, command=self._on_queue_scrollbar_drag, fg_color="transparent", button_color="#262626", button_hover_color="#333333")
@@ -3440,6 +3577,22 @@ class EncoderApp:
         self.setup_inspector_tab()
 
         # Tab 3: Console
+        self.logs_top_bar = ctk.CTkFrame(self.tabview, fg_color="transparent")
+        self.btn_open_log = ctk.CTkButton(
+            self.logs_top_bar, text="Open Log", width=80, height=26, corner_radius=6,
+            fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER,
+            font=ctk.CTkFont(family="SF Pro Text", size=11, weight="bold"),
+            command=self.open_log_file
+        )
+        self.btn_open_log.pack(side="right")
+        self.btn_open_output_dir = ctk.CTkButton(
+            self.logs_top_bar, text="Open Output", width=92, height=26, corner_radius=6,
+            fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER,
+            font=ctk.CTkFont(family="SF Pro Text", size=11, weight="bold"),
+            command=self.open_output_folder
+        )
+        self.btn_open_output_dir.pack(side="right", padx=(0, 6))
+
         self.log_text = ctk.CTkTextbox(self.tab_logs, font=ctk.CTkFont(family="SF Mono", size=10), fg_color="#0e0e0e", text_color="#d8d8d8", corner_radius=8, border_width=1, border_color="#1e1e1e")
         self.log_text.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -3546,25 +3699,13 @@ class EncoderApp:
             self.scroll_handler.manual_scroller = manual_scroller
             self.scroll_handler.manual_view = manual_text
 
-        def _on_manual_wheel(event):
-            try:
-                raw_delta = getattr(event, "delta", 0)
-                if getattr(event, "num", None) == 4: raw_delta = 1
-                elif getattr(event, "num", None) == 5: raw_delta = -1
-                if raw_delta != 0:
-                    manual_scroller.handle_wheel_input(float(raw_delta))
-                    return "break"
-            except Exception:
-                pass
+        def _cleanup_manual_scroll(event=None):
+            if event is None or event.widget is win:
+                if hasattr(self, "scroll_handler"):
+                    self.scroll_handler.manual_scroller = None
+                    self.scroll_handler.manual_view = None
 
-        for seq in ("<MouseWheel>", "<TouchpadScroll>", "<Button-4>", "<Button-5>"):
-            try:
-                win.bind(seq, _on_manual_wheel, add="+")
-                manual_text.bind(seq, _on_manual_wheel, add="+")
-                if hasattr(manual_text, "_textbox"):
-                    manual_text._textbox.bind(seq, _on_manual_wheel, add="+")
-            except Exception:
-                pass
+        win.bind("<Destroy>", _cleanup_manual_scroll, add="+")
 
         tb = getattr(manual_text, "_textbox", manual_text)
         tb.configure(state="normal", padx=20, pady=16)
@@ -3590,7 +3731,7 @@ class EncoderApp:
              ]),
 
             ("2. SILICON HARDWARE TIERS & CONCURRENCY",
-             "Encode streams are dynamically budgeted: 8K streams consume 6 resource units (strictly 1 per engine), 4K streams take 2 units, and HD/1440p take 1 unit to prevent GPU lock contention.",
+             "Encode streams are dynamically budgeted: 8K streams consume 4 resource units (strictly 1 per engine), 4K streams take 2 units, and HD/1440p take 1 unit to prevent GPU lock contention.",
              [
                  ("Base / Pro (M1–M4)", "1 Dedicated Hardware Video Encode Engine."),
                  ("Max Chips", "2 Dedicated Hardware Video Encode Engines."),
@@ -3601,9 +3742,9 @@ class EncoderApp:
              ]),
 
             ("3. RECOMMENDED PRESETS & BEST SETTINGS",
-             "If your Mac tier lacks hardware 10-Bit 4:2:2 encode support, MediaEngine safely falls back to 10-Bit 4:2:0 without crashing or dropping bit depth.",
+             "All Apple Silicon Macs (M1, M2, M3, M4+ across Base, Pro, Max, and Ultra) support hardware 10-Bit 4:2:2 HEVC encode & decode. On systems without hardware 4:2:2 support (such as older Intel Macs), MediaEngine safely falls back to 10-Bit 4:2:0.",
              [
-                 ("Log Footage Preset", "HEVC • 10-Bit 4:2:2 • Quality: 69 (Master)"),
+                 ("Log Footage Preset", "HEVC • 10-Bit 4:2:2 • Quality: 69 (High)"),
                  ("Why Q69 for Log?", "Preserves shadow latitude, fine grain structure, and subtle gradations without banding."),
                  ("Non-Log Preset", "HEVC • 10-Bit 4:2:0 • Quality: 58 (Balanced)"),
                  ("Why Q58 for Rec.709?", "Optimal sweet spot for delivery, web, and archives with high compression and zero visible loss."),
@@ -3630,7 +3771,6 @@ class EncoderApp:
             ("6. MEDIA INSPECTOR & SHORTCUTS",
              "Deep stream inspection, NCLX color atom verification, and production productivity shortcuts.",
              [
-                 ("Option-Drop (⌥)", "Hold Option while dropping any file or folder to open directly in the Media Inspector."),
                  ("Deep Media Inspector", "Inspects video/audio streams, NCLX atoms, HDR side data, channel layouts, or raw JSON."),
                  ("Add to Queue", "One-click button in the Inspector to immediately queue an inspected video."),
                  ("Per-Item Settings", "Click any queued item to customize its preset, codec, or quality independently."),
@@ -3905,12 +4045,11 @@ class EncoderApp:
         else:
             tb = getattr(self.inspector_text, "_textbox", self.inspector_text)
             cur_w = tb.winfo_width()
-            last_w = getattr(self, "_last_inspector_w", None)
             self._reflow_badges()
-            if last_w is None or abs(cur_w - last_w) > 30:
-                self._last_inspector_w = cur_w
-                self._update_inspector_tabs()
-                if getattr(self, "inspected_path", None) and not getattr(self, "raw_json_mode", False):
+            self._update_inspector_tabs()
+            want_two_col = (cur_w > 560)
+            if getattr(self, "_inspector_two_col", None) != want_two_col:
+                if getattr(self, "inspected_path", None):
                     self._render_inspection(self.inspected_data, self.inspected_path)
 
     def show_inspector_placeholder(self):
@@ -4257,6 +4396,9 @@ class EncoderApp:
                     ("Aspect Ratio", dar if dar else None),
                     ("Bit Depth", f"{bit_depth} ({pix_fmt})"),
                     ("Chroma Sampling", chroma),
+                    ("Color Range", "Full (PC)" if c_range in ("pc", "full", "jpeg") else ("Limited (TV)" if c_range in ("tv", "limited") else None)),
+                    ("Color Primaries", c_prim if c_prim != "unspecified" else None),
+                    ("Color Transfer", c_trc if c_trc != "unspecified" else None),
                     ("Matrix / Space", c_space if c_space != "unspecified" else None),
                 ]
 
@@ -4315,6 +4457,7 @@ class EncoderApp:
         tb.delete("1.0", "end")
 
         self._update_inspector_tabs()
+        self._inspector_two_col = (tb.winfo_width() > 560)
 
         tb.tag_configure("sec_h", font=("SF Pro Display", 12, "bold"), foreground=TEXT_PRIMARY, spacing1=8, spacing3=2)
         tb.tag_configure("lbl", font=("SF Pro Text", 11), foreground=TEXT_MUTED, spacing1=2, spacing3=2)
@@ -4359,26 +4502,6 @@ class EncoderApp:
         self.inspector_text.insert("1.0", f"\n❌ Failed to inspect file metadata:\n\n{err}\n")
         self.inspector_text.configure(state="disabled")
 
-    def _render_raw_json(self):
-        if not self.inspected_data: return
-        self.inspector_text.configure(state="normal")
-        self.inspector_text.delete("1.0", "end")
-        self.inspector_text.insert("1.0", json.dumps(self.inspected_data, indent=2))
-        self.inspector_text.configure(state="disabled")
-        self.inspector_scroller.sync_position()
-
-    def toggle_raw_json(self):
-        self.raw_json_mode = not self.raw_json_mode
-        self.btn_inspect_raw.configure(
-            text="Clean View" if self.raw_json_mode else "Raw JSON",
-            fg_color="#143e25" if self.raw_json_mode else NEUTRAL_BTN
-        )
-        if self.inspected_data and self.inspected_path:
-            if self.raw_json_mode:
-                self._render_raw_json()
-            else:
-                self._render_inspection(self.inspected_data, self.inspected_path)
-
     def browse_inspect_file(self):
         f = filedialog.askopenfilename(
             title="Select File to Inspect",
@@ -4394,6 +4517,16 @@ class EncoderApp:
                 return
             self.handle_incoming_files([self.inspected_path])
             self.tabview.set("Batch Queue")
+
+    def reveal_completed_item(self, item_id):
+        with self.queue_lock:
+            item = self.items_by_id.get(item_id)
+            out_path = item.get("output_path") if item else None
+        if out_path and os.path.exists(out_path):
+            try:
+                subprocess.Popen(["open", "-R", out_path])
+            except Exception as e:
+                self.append_log(f"[ERROR] Could not reveal file in Finder: {e}\n")
 
     def inspect_queued_item(self, item_id):
         with self.queue_lock:
@@ -4426,6 +4559,12 @@ class EncoderApp:
                     self.inspector_top_bar.lift()
                 else:
                     self.inspector_top_bar.place_forget()
+            if hasattr(self, "logs_top_bar"):
+                if self.tabview.get() == "Live Console":
+                    self.logs_top_bar.place(relx=1.0, x=-6, y=4, anchor="ne")
+                    self.logs_top_bar.lift()
+                else:
+                    self.logs_top_bar.place_forget()
             if self.tabview.get() == "Live Console":
                 self.log_text.see("end")
             elif self.tabview.get() == "Media Inspector":
@@ -4435,11 +4574,34 @@ class EncoderApp:
                     self.inspector_scroller.sync_position()
         except Exception: pass
 
+    def open_output_folder(self):
+        out_dir = os.path.expanduser(self.dest_var.get().strip() or "~/Desktop")
+        if os.path.isdir(out_dir):
+            try:
+                subprocess.Popen(["open", out_dir])
+            except Exception as e:
+                self.append_log(f"[ERROR] Could not open output folder: {e}\n")
+        else:
+            messagebox.showinfo("Output Folder", f"Folder does not exist yet:\n{out_dir}")
+
+    def open_log_file(self):
+        if os.path.exists(LOG_FILE):
+            try:
+                subprocess.Popen(["open", LOG_FILE])
+            except Exception as e:
+                self.append_log(f"[ERROR] Could not open log file: {e}\n")
+        else:
+            messagebox.showinfo("Log File", "No log file has been created yet.")
+
     def mark_custom_settings(self):
         if not self._preset_loading and not getattr(self, "_loading_selection_settings", False) and not getattr(self, "_updating_settings", False):
             self._updating_settings = True
             try:
                 self.preset_var.set("Custom")
+                if getattr(self, "selected_queue_ids", None):
+                    self.update_settings_summary()
+                    self.apply_settings_to_selected()
+                    return
                 self.save_last_preset_choice("Custom")
                 try:
                     settings = self.get_current_settings()
@@ -4453,7 +4615,7 @@ class EncoderApp:
                         "quality": str(int(round(float(settings["quality"])))),
                         "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
                         "audio": settings.get("audio", "Auto"),
-                        "denoise": bool(settings.get("denoise", False))
+                        "denoise": settings.get("denoise", False)
                     }
                     self.save_presets_to_disk()
                 except Exception:
@@ -4496,7 +4658,7 @@ class EncoderApp:
             "quality": str(int(round(float(settings["quality"])))),
             "quality_encoder": settings.get("quality_encoder", settings["encoder"]),
             "audio": settings.get("audio", "Auto"),
-            "denoise": bool(settings.get("denoise", False))
+            "denoise": settings.get("denoise", False)
         }
         self.save_presets_to_disk()
         self.save_last_preset_choice(preset_name)
@@ -4553,6 +4715,7 @@ class EncoderApp:
                     ptext = payload[2] if len(payload) > 2 else None
                     rstats = payload[3] if len(payload) > 3 else False
                     dstats = payload[4] if len(payload) > 4 else None
+                    sel_changed = False
                     with self.queue_lock:
                         item = self.items_by_id.get(item_id)
                         if item:
@@ -4560,6 +4723,18 @@ class EncoderApp:
                             item["progress_text"] = ptext
                             if dstats is not None:
                                 item["done_stats"] = dstats
+                        if status != "queued" and item_id in self.selected_queue_ids:
+                            self.selected_queue_ids.discard(item_id)
+                            if getattr(self, "_selection_pivot_id", None) == item_id:
+                                self._selection_pivot_id = next(iter(self.selected_queue_ids)) if self.selected_queue_ids else None
+                            sel_changed = True
+                    if sel_changed:
+                        if not self.selected_queue_ids:
+                            self._restore_global_settings()
+                        self.canvas_queue.set_selected_ids(self.selected_queue_ids)
+                        self.update_settings_header_label()
+                        self.update_settings_summary()
+                        self._update_select_all_btn()
                     self.canvas_queue.update_item_status(item_id, status, ptext, done_stats=dstats)
                     if rstats: refresh_stats = True
                 elif event_type == "refresh_queue":
@@ -4606,18 +4781,21 @@ class EncoderApp:
                     self.log_text.see("end")
         except Exception: pass
         finally:
-            self.root.after(50, self._process_ui_queue)
+            self.root.after(100, self._process_ui_queue)
 
     def _apply_app_state(self, state):
         if state == "encoding":
+            if hasattr(self, "active_jobs_canvas"): self.active_jobs_canvas.set_paused(False)
             self.status_badge.configure(text="● ENCODING", text_color=ULTRA_TEXT, fg_color=ULTRA_BG)
             self.btn_cancel.configure(state="normal")
             self.update_action_button_ui()
         elif state == "paused":
+            if hasattr(self, "active_jobs_canvas"): self.active_jobs_canvas.set_paused(True)
             self.status_badge.configure(text="❚❚ PAUSED", text_color=HOLD_TEXT, fg_color=HOLD_BG)
             self.btn_cancel.configure(state="normal")
             self.update_action_button_ui()
         elif state == "idle":
+            if hasattr(self, "active_jobs_canvas"): self.active_jobs_canvas.set_paused(False)
             self.status_badge.configure(text="● IDLE", text_color=DONE_GREEN, fg_color=DONE_BG)
             self.btn_cancel.configure(state="disabled")
             self.update_action_button_ui()
@@ -4692,6 +4870,13 @@ class EncoderApp:
             dialog = ctk.CTkInputDialog(text="Enter VideoToolbox Quality (1 - 100):", title="Set Quality")
         else:
             dialog = ctk.CTkInputDialog(text="Enter Target CRF (0 - 51, lower is higher quality):", title="Set CRF")
+        def _trigger_ok(event=None):
+            try: dialog._ok_event()
+            except Exception: pass
+            return "break"
+        for key_seq in ("<Return>", "<KP_Enter>"):
+            dialog.bind(key_seq, _trigger_ok)
+            if hasattr(dialog, "_entry"): dialog._entry.bind(key_seq, _trigger_ok)
         val_str = dialog.get_input()
         if val_str and val_str.strip():
             try:
@@ -4759,10 +4944,10 @@ class EncoderApp:
                     self.container_var.set(c_disp)
                 self.current_audio = p.get("audio", "Auto")
                 self.codec_var.set(p.get("codec", "HEVC (H.265)"))
-                if hasattr(self, "cb_denoise"):
-                    p_denoise = bool(p.get("denoise", name in ("Log Footage", "Non-Log Footage")))
-                    if p_denoise: self.cb_denoise.select()
-                    else: self.cb_denoise.deselect()
+                if hasattr(self, "denoise_var"):
+                    p_denoise = p.get("denoise", name in ("Log Footage", "Non-Log Footage"))
+                    self.denoise_var.set(self._denoise_val_to_label(p_denoise))
+                    self._style_denoise_menu()
                 self.current_encoder = p.get("encoder", "AppleMediaEngine")
                 self.encoder_var.set(self.current_encoder)
                 chroma_setting = p.get("chroma", DEFAULT_CHROMA)
@@ -4806,42 +4991,6 @@ class EncoderApp:
         self.sync_encoder_ui()
         self.mark_custom_settings()
 
-    def _on_key_press_option(self, event):
-        if getattr(event, "keysym", "") in ("Alt_L", "Alt_R", "Option"):
-            self._option_key_pressed = True
-            self._sync_option_ui_state()
-
-    def _on_key_release_option(self, event):
-        if getattr(event, "keysym", "") in ("Alt_L", "Alt_R", "Option"):
-            self._option_key_pressed = False
-            self._sync_option_ui_state()
-
-    def is_option_held(self, event=None):
-        if event:
-            state = getattr(event, "state", 0)
-            if isinstance(state, int) and (state & 0x18):
-                return True
-            mods = str(getattr(event, "modifier", "")).lower()
-            if "alt" in mods or "opt" in mods:
-                return True
-        if getattr(self, "_option_key_pressed", False):
-            return True
-        return is_macos_option_held()
-
-    def _sync_option_ui_state(self):
-        held = self.is_option_held()
-        if hasattr(self, "canvas_queue"):
-            self.canvas_queue.set_option_mode(held)
-
-    def _poll_option_key(self):
-        try:
-            if self.root.focus_displayof() is not None:
-                self._sync_option_ui_state()
-        except Exception:
-            pass
-        finally:
-            self.root.after(350, self._poll_option_key)
-
     def setup_drag_and_drop(self):
         if not HAS_TKDND or not getattr(self.root, "TkdndVersion", None):
             self.append_log("[INFO] Drag & Drop library unavailable; manual browse buttons active.\n")
@@ -4860,10 +5009,11 @@ class EncoderApp:
                     cleaned_files = [clean_file_path(f) for f in files if clean_file_path(f)]
                     if not cleaned_files:
                         return "break"
-                    if self.is_option_held(event) or (hasattr(self, "tabview") and self.tabview.get() == "Media Inspector"):
-                        self.tabview.set("Media Inspector")
+                    if hasattr(self, "tabview") and self.tabview.get() == "Media Inspector" and not os.path.isdir(cleaned_files[0]):
                         self.inspect_file(cleaned_files[0])
                     else:
+                        if hasattr(self, "tabview") and self.tabview.get() == "Media Inspector":
+                            self.tabview.set("Batch Queue")
                         self.handle_incoming_files(cleaned_files)
             except Exception as e:
                 self.append_log(f"[ERROR] Drop processing error: {e}\n")
@@ -4881,8 +5031,12 @@ class EncoderApp:
                         files = [m[0] or m[1] for m in matches] if matches else [raw_data]
                     cleaned_files = [clean_file_path(f) for f in files if clean_file_path(f)]
                     if cleaned_files:
-                        self.tabview.set("Media Inspector")
-                        self.inspect_file(cleaned_files[0])
+                        if not os.path.isdir(cleaned_files[0]):
+                            self.tabview.set("Media Inspector")
+                            self.inspect_file(cleaned_files[0])
+                        else:
+                            self.tabview.set("Batch Queue")
+                            self.handle_incoming_files(cleaned_files)
             except Exception as e:
                 self.append_log(f"[ERROR] Inspector drop error: {e}\n")
             return "break"
@@ -4922,13 +5076,17 @@ class EncoderApp:
             except Exception:
                 pass
             self._dest_debounce_job = None
+        if getattr(self, "_loading_selection_settings", False) or getattr(self, "_preset_loading", False):
+            return
         new_dest = self.dest_var.get().strip()
-        self.save_output_dir(new_dest)
-        with self.queue_lock:
-            for item in self.queue_items:
-                if item.get("status") == "queued":
-                    item["settings"]["dest_dir"] = os.path.expanduser(new_dest)
-        self.apply_settings_to_selected()
+        if getattr(self, "selected_queue_ids", None):
+            self.apply_settings_to_selected()
+        else:
+            self.save_output_dir(new_dest)
+            with self.queue_lock:
+                for item in self.queue_items:
+                    if item.get("status") == "queued":
+                        item["settings"]["dest_dir"] = os.path.expanduser(new_dest)
 
     def _debounce_dest_change(self, *args):
         if getattr(self, "_dest_debounce_job", None):
@@ -4936,6 +5094,9 @@ class EncoderApp:
                 self.root.after_cancel(self._dest_debounce_job)
             except Exception:
                 pass
+            self._dest_debounce_job = None
+        if getattr(self, "_loading_selection_settings", False) or getattr(self, "_preset_loading", False):
+            return
         self._dest_debounce_job = self.root.after(350, self._on_dest_changed)
 
     def browse_dest(self):
@@ -4967,7 +5128,7 @@ class EncoderApp:
             "speed": "fast",
             "concurrency": getattr(self, "concurrency_mode", "Balanced"),
             "tag_settings": bool(getattr(self, "tag_settings", False)),
-            "denoise": bool(self.cb_denoise.get()) if hasattr(self, "cb_denoise") else (preset_name in ("Log Footage", "Non-Log Footage"))
+            "denoise": self._denoise_label_to_val(self.denoise_var.get()) if hasattr(self, "denoise_var") else (preset_name in ("Log Footage", "Non-Log Footage"))
         }
 
     def handle_incoming_files(self, files):
@@ -4986,7 +5147,7 @@ class EncoderApp:
                 start_dispatcher = False
                 added_count = 0
                 prepared_items = []
-                for v_path, v_rel in batch_chunk:
+                for v_path, v_rel, f_info, s_rel in batch_chunk:
                     if v_path in batch_seen: continue
                     batch_seen.add(v_path)
                     file_name = os.path.basename(v_path)
@@ -4994,8 +5155,9 @@ class EncoderApp:
 
                     item_data = {
                         "path": v_path, "rel_dir": v_rel,
+                        "folder_info": f_info, "sub_rel": s_rel,
                         "filename": file_name, "display_name": disp_name,
-                        "settings": settings, "status": "queued", "progress_text": None,
+                        "settings": dict(settings), "status": "queued", "progress_text": None,
                         "done_stats": ""
                     }
                     prepared_items.append(item_data)
@@ -5028,21 +5190,23 @@ class EncoderApp:
                     if not clean: continue
                     if os.path.isdir(clean):
                         clean_abs = os.path.abspath(clean)
-                        safe_top_folder = get_safe_output_folder(clean_abs, dest_dir)
+                        folder_name = os.path.basename(os.path.normpath(clean_abs)) or "Encoded_Output"
+                        folder_info = {"source_root": clean_abs, "resolved": {}}
                         for root_dir, _, filenames in os.walk(clean_abs):
                             sub_rel = os.path.relpath(root_dir, clean_abs)
-                            folder_rel = safe_top_folder if sub_rel == "." else os.path.join(safe_top_folder, sub_rel)
+                            sub_rel_clean = "" if sub_rel == "." else sub_rel
+                            folder_rel = folder_name if sub_rel == "." else os.path.join(folder_name, sub_rel)
                             for fname in sorted(filenames):
                                 if fname.startswith("."): continue
                                 if fname.lower().endswith(SUPPORTED_EXTENSIONS):
                                     abs_path = os.path.abspath(os.path.join(root_dir, fname))
-                                    batch_chunk.append((abs_path, folder_rel))
+                                    batch_chunk.append((abs_path, folder_rel, folder_info, sub_rel_clean))
                                     if len(batch_chunk) >= 50: flush_chunk()
                     elif os.path.isfile(clean):
                         if not os.path.basename(clean).startswith("."):
                             if clean.lower().endswith(SUPPORTED_EXTENSIONS):
                                 abs_path = os.path.abspath(clean)
-                                batch_chunk.append((abs_path, ""))
+                                batch_chunk.append((abs_path, "", None, ""))
                                 if len(batch_chunk) >= 50: flush_chunk()
 
                 flush_chunk()
@@ -5095,6 +5259,7 @@ class EncoderApp:
         threading.Thread(target=terminate_job, daemon=True).start()
 
     def clear_completed_items(self):
+        self._last_batch_summary = None
         with self.queue_lock:
             self.queue_items = [q for q in self.queue_items if q["status"] not in ("completed", "failed", "cancelled")]
             self.items_by_id = {q["id"]: q for q in self.queue_items}
@@ -5113,18 +5278,13 @@ class EncoderApp:
             self.selected_queue_ids.clear()
             self._selection_pivot_id = None
             items_snapshot = list(self.queue_items)
+        self._restore_global_settings()
         self.canvas_queue.set_items(items_snapshot)
         self.canvas_queue.set_selected_ids(self.selected_queue_ids)
         self.update_settings_header_label()
         self.update_settings_summary()
         self._update_queue_stats()
         if removed_count > 0: self.append_log(f"[INFO] Cleared {removed_count} queued item(s).\n")
-
-    def _start_batch_tween(self):
-        pass
-
-    def _batch_tween_step(self):
-        pass
 
     def _update_queue_stats(self):
         with self.queue_lock:
@@ -5143,6 +5303,7 @@ class EncoderApp:
                     total_progress += min(0.999, max(0.0, item_pct / 100.0))
 
         if total == 0:
+            self._last_batch_summary = None
             self.lbl_batch_status.configure(text="Queue is empty")
             self.batch_target_pct = 0.0
             self.batch_cur_pct = 0.0
@@ -5153,6 +5314,7 @@ class EncoderApp:
                 self.batch_anim_job = None
             self.lbl_batch_pct.configure(text="0%")
             self.batch_progress_bar.set(0)
+            self._update_select_all_btn()
         else:
             target_p = min(100.0, max(0.0, (total_progress / total) * 100.0)) if total > 0 else 0.0
             self.batch_target_pct = target_p
@@ -5170,6 +5332,8 @@ class EncoderApp:
             if on_hold > 0: parts.append(f"{on_hold} On Hold")
             if queued > 0: parts.append(f"{queued} Queued")
             if parts: txt += " • " + " • ".join(parts)
+            elif completed > 0 and getattr(self, "_last_batch_summary", None):
+                txt += f"  •  {self._last_batch_summary}"
             if self.lbl_batch_status.cget("text") != txt:
                 self.lbl_batch_status.configure(text=txt)
             self._update_select_all_btn()
@@ -5248,6 +5412,8 @@ class EncoderApp:
             if not item or item.get("status") != "queued":
                 self.clear_selection()
                 return
+        if not getattr(self, "selected_queue_ids", None) and getattr(self, "_saved_global_settings", None) is None:
+            self._saved_global_settings = self.get_current_settings()
 
         state = getattr(event, "state", 0) if event else 0
         if not isinstance(state, int):
@@ -5312,11 +5478,13 @@ class EncoderApp:
         if st:
             self._loading_selection_settings = True
             try:
+                p_val = st.get("preset")
+                if p_val and hasattr(self, "preset_var") and p_val in self.presets:
+                    self.preset_var.set(p_val)
                 c_val = st.get("codec", "HEVC (H.265)")
                 self.codec_var.set(c_val)
                 e_val = st.get("encoder", "AppleMediaEngine")
                 self.current_encoder = e_val
-                e_val = st.get("encoder", "AppleMediaEngine")
                 self.encoder_var.set(e_val)
                 self.sync_encoder_ui()
 
@@ -5355,18 +5523,67 @@ class EncoderApp:
                     self.tag_settings = bool(st["tag_settings"])
                     if self.tag_settings: self.cb_tag_settings.select()
                     else: self.cb_tag_settings.deselect()
-                if "denoise" in st and hasattr(self, "cb_denoise"):
-                    if st["denoise"]: self.cb_denoise.select()
-                    else: self.cb_denoise.deselect()
+                if "denoise" in st and hasattr(self, "denoise_var"):
+                    self.denoise_var.set(self._denoise_val_to_label(st["denoise"]))
+                    self._style_denoise_menu()
             finally:
                 self._loading_selection_settings = False
         self.update_settings_header_label()
         self.update_settings_summary()
 
+    def _restore_global_settings(self):
+        st = getattr(self, "_saved_global_settings", None)
+        self._saved_global_settings = None
+        if not st:
+            return
+        self._loading_selection_settings = True
+        try:
+            p_val = st.get("preset")
+            if p_val and hasattr(self, "preset_var") and p_val in self.presets:
+                self.preset_var.set(p_val)
+            self.codec_var.set(st.get("codec", "HEVC (H.265)"))
+            e_val = st.get("encoder", "AppleMediaEngine")
+            self.current_encoder = e_val
+            self.encoder_var.set(e_val)
+            self.sync_encoder_ui()
+            chr_val = st.get("chroma", DEFAULT_CHROMA)
+            if not HAS_VT_422 and "4:2:2" in chr_val:
+                chr_val = "10-Bit 4:2:0"
+            self.chroma_var.set(chr_val)
+            if hasattr(self, "resolution_var"):
+                r_v = st.get("resolution", "Original")
+                self.resolution_var.set(r_v if r_v in self.resolution_cb.cget("values") else "Original")
+            if hasattr(self, "framerate_var"):
+                f_v = st.get("framerate", "Original")
+                self.framerate_var.set(f_v if f_v in self.framerate_cb.cget("values") else "Original")
+            if hasattr(self, "container_var"):
+                c_v = st.get("container", "Auto")
+                self.container_var.set(c_v if c_v in self.container_cb.cget("values") else "Auto")
+            q_val = int(st.get("quality", 69))
+            if e_val == "AppleMediaEngine":
+                self.last_vt_quality = max(1, min(100, q_val))
+                self.quality_slider.set(self.last_vt_quality)
+            else:
+                self.last_cpu_crf = max(0, min(51, q_val))
+                self.quality_slider.set(self.last_cpu_crf)
+            self.lbl_quality_val.configure(text=get_quality_description(int(round(self.quality_slider.get())), e_val))
+            if st.get("dest_dir"):
+                self.dest_var.set(st["dest_dir"])
+            if hasattr(self, "cb_tag_settings"):
+                self.tag_settings = bool(st.get("tag_settings", False))
+                if self.tag_settings: self.cb_tag_settings.select()
+                else: self.cb_tag_settings.deselect()
+            if hasattr(self, "denoise_var"):
+                self.denoise_var.set(self._denoise_val_to_label(st.get("denoise", False)))
+                self._style_denoise_menu()
+        finally:
+            self._loading_selection_settings = False
+
     def clear_selection(self):
         if getattr(self, "selected_queue_ids", None):
             self.selected_queue_ids.clear()
             self._selection_pivot_id = None
+            self._restore_global_settings()
             self.canvas_queue.set_selected_ids(self.selected_queue_ids)
             self.update_settings_header_label()
             self.update_settings_summary()
@@ -5380,6 +5597,8 @@ class EncoderApp:
         if self.selected_queue_ids == queued_ids:
             self.clear_selection()
         else:
+            if not getattr(self, "selected_queue_ids", None) and getattr(self, "_saved_global_settings", None) is None:
+                self._saved_global_settings = self.get_current_settings()
             self.selected_queue_ids = set(queued_ids)
             self._selection_pivot_id = next(iter(self.selected_queue_ids))
             self.canvas_queue.set_selected_ids(self.selected_queue_ids)
@@ -5446,6 +5665,7 @@ class EncoderApp:
         for cid in to_cancel:
             self.cancel_single_item(cid)
 
+        self._restore_global_settings()
         self.canvas_queue.set_items(items_snapshot)
         self.canvas_queue.set_selected_ids(self.selected_queue_ids)
         self.update_settings_header_label()
@@ -5469,12 +5689,33 @@ class EncoderApp:
         self.canvas_queue.set_items(items_snapshot)
         self.canvas_queue.set_selected_ids(self.selected_queue_ids)
 
+    def _update_item_hold_clock(self, item_id):
+        st = self.item_hold_state.setdefault(item_id, {"held_total": 0.0, "held_since": None})
+        is_held = self.is_paused or (item_id in self.suspended_ids)
+        now_m = time.monotonic()
+        if is_held and st["held_since"] is None:
+            st["held_since"] = now_m
+        elif not is_held and st["held_since"] is not None:
+            st["held_total"] += max(0.0, now_m - st["held_since"])
+            st["held_since"] = None
+
+    def _get_item_active_time(self, item_id):
+        with self.process_lock:
+            self._update_item_hold_clock(item_id)
+            st = self.item_hold_state[item_id]
+            held = st["held_total"]
+            if st["held_since"] is not None:
+                held += max(0.0, time.monotonic() - st["held_since"])
+        return time.monotonic() - held
+
     def toggle_pause(self):
         if not self.is_running: return
         with self.process_lock:
             try:
                 if not self.is_paused:
                     self.is_paused = True
+                    for iid in list(self.running_ids | self.suspended_ids):
+                        self._update_item_hold_clock(iid)
                     self.set_app_state("paused")
                     for proc in list(self.active_processes.values()):
                         if proc and proc.poll() is None:
@@ -5482,6 +5723,8 @@ class EncoderApp:
                     self.append_log("❚❚ [PAUSED] Encoding queue paused.\n")
                 else:
                     self.is_paused = False
+                    for iid in list(self.running_ids | self.suspended_ids):
+                        self._update_item_hold_clock(iid)
                     self.set_app_state("encoding")
                     for item_id in list(self.running_ids):
                         proc = self.active_processes.get(item_id)
@@ -5552,16 +5795,19 @@ class EncoderApp:
         if "timecode" in ftags: timecode = ftags["timecode"]
 
         streams = data.get("streams", [])
+        for s in streams:
+            if "duration" in s:
+                try: duration = max(duration, float(s["duration"]))
+                except ValueError: pass
+            if not timecode and (s.get("codec_tag_string") == "tmcd" or s.get("codec_name") == "bin_data"):
+                d_tags = {str(k).lower(): v for k, v in (s.get("tags") or {}).items()}
+                if "timecode" in d_tags: timecode = d_tags["timecode"]
         v_stream = next((s for s in streams if s.get("codec_type") == "video" and (s.get("disposition", {}) or {}).get("attached_pic") != 1), None)
         if not v_stream:
             v_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
         if v_stream:
             if "duration" in v_stream:
                 try: duration = max(duration, float(v_stream["duration"]))
-                except ValueError: pass
-        for s in streams:
-            if "duration" in s:
-                try: duration = max(duration, float(s["duration"]))
                 except ValueError: pass
             if "width" in v_stream:
                 try: width = int(v_stream["width"])
@@ -5720,7 +5966,7 @@ class EncoderApp:
             is_4k = (pixels >= 7_000_000) or (w >= 3500) or (h >= 2000)
             is_1440p = (pixels >= 3_000_000) or (w >= 2400) or (h >= 1300)
             if is_8k:
-                weight = 6
+                weight = 4
             elif is_4k:
                 weight = 2
             elif is_1440p:
@@ -5741,8 +5987,25 @@ class EncoderApp:
             try: caffeinate_proc = subprocess.Popen(["caffeinate", "-dis", "-w", str(os.getpid())])
             except Exception: pass
         try:
+            with self.queue_lock:
+                if getattr(self, "_batch_start_time", None) is None:
+                    self._batch_start_time = time.monotonic()
+                    self._batch_orig_bytes = 0
+                    self._batch_new_bytes = 0
+                    self._batch_completed_count = 0
+                    self._last_batch_summary = None
             while True:
                 if self.is_paused:
+                    with self.process_lock:
+                        with self.queue_lock:
+                            has_unfinished = any(q["status"] in ("queued", "encoding", "suspended") for q in self.queue_items)
+                            has_active = bool(self.active_processes) or bool(self.running_ids) or bool(self.suspended_ids)
+                            is_scanning = getattr(self, "active_scans", 0) > 0
+                            if not has_unfinished and not has_active and not is_scanning:
+                                self.is_paused = False
+                                self.is_running = False
+                                self.dispatcher_alive = False
+                                break
                     time.sleep(0.3)
                     continue
 
@@ -5846,11 +6109,27 @@ class EncoderApp:
 
                 with self.process_lock:
                     with self.queue_lock:
-                        has_unfinished = any(q["status"] in ("queued", "encoding") for q in self.queue_items)
+                        has_unfinished = any(q["status"] in ("queued", "encoding", "suspended") for q in self.queue_items)
                         has_active = bool(self.active_processes) or bool(self.running_ids) or bool(self.suspended_ids)
                         is_scanning = getattr(self, "active_scans", 0) > 0
                         if not has_unfinished and not has_active and not is_scanning:
                             if not any(q["status"] == "queued" for q in self.queue_items):
+                                if getattr(self, "_batch_completed_count", 0) > 0 and getattr(self, "_batch_start_time", None) is not None:
+                                    elapsed = max(0.0, time.monotonic() - self._batch_start_time)
+                                    dur_s = format_time_duration(elapsed, force_hours=(elapsed >= 3600))
+                                    orig_b, new_b, comp_cnt = self._batch_orig_bytes, self._batch_new_bytes, self._batch_completed_count
+                                    if orig_b > 0 and new_b > 0:
+                                        saved_b = orig_b - new_b
+                                        saved_pct = (saved_b / float(orig_b)) * 100.0
+                                        sign_c = "-" if saved_b >= 0 else "+"
+                                        word = "saved" if saved_b >= 0 else "added"
+                                        saved_s = f"{format_bytes(abs(saved_b))} {word} ({sign_c}{abs(saved_pct):.1f}%)"
+                                        self._last_batch_summary = f"{dur_s} • {saved_s}"
+                                        self.append_log(f"✔ [BATCH COMPLETE] {comp_cnt} file{'s' if comp_cnt != 1 else ''} in {dur_s}  •  {format_bytes(orig_b)} → {format_bytes(new_b)} ({saved_s})\n")
+                                    else:
+                                        self._last_batch_summary = f"{dur_s}"
+                                        self.append_log(f"✔ [BATCH COMPLETE] {comp_cnt} file{'s' if comp_cnt != 1 else ''} in {dur_s}\n")
+                                self._batch_start_time = None
                                 rotate_log_file()
                                 if os.path.exists(SOUND_CHIME):
                                     try: subprocess.Popen(["afplay", SOUND_CHIME])
@@ -5858,7 +6137,7 @@ class EncoderApp:
                                 self.is_running = False
                                 self.dispatcher_alive = False
                                 break
-                time.sleep(0.1)
+                time.sleep(0.35 if len(self.running_ids) >= max_jobs else 0.1)
         except Exception:
             self._dispatcher_crash_count = getattr(self, "_dispatcher_crash_count", 0) + 1
             self.append_log(f"✖ [DISPATCHER CRASH ({self._dispatcher_crash_count}/3)] {traceback.format_exc()}\n")
@@ -5880,6 +6159,8 @@ class EncoderApp:
                         (crashes > 0 and (has_queued or is_scanning))
                     )
                     if crashes >= 3:
+                        self.is_paused = False
+                        self._batch_start_time = None
                         self.is_running = False
                         self.dispatcher_alive = False
                         self.cancel_requested = False
@@ -5895,6 +6176,8 @@ class EncoderApp:
                         self.set_app_state("encoding")
                         respawn_needed = True
                     else:
+                        self.is_paused = False
+                        self._batch_start_time = None
                         self.is_running = False
                         self.dispatcher_alive = False
                         self.cancel_requested = False
@@ -5940,26 +6223,47 @@ class EncoderApp:
                 probe = self.probe_media_file(f, timeout=25)
                 if probe and probe.get("streams"):
                     current_item["probe_data"] = probe
+            if not probe or not probe.get("streams"):
+                raise RuntimeError(f"FFprobe could not read media streams from '{display_name}'.")
             if "video_info" in current_item and current_item["video_info"][2] > 0:
                 duration, fps, width, height, timecode, pix_fmt_in = current_item["video_info"]
             else:
                 duration, fps, width, height, timecode, pix_fmt_in = self.get_video_stream_info(f, probe_data=probe)
                 current_item["video_info"] = (duration, fps, width, height, timecode, pix_fmt_in)
 
+            rot_deg = 0
+            v_rot_s = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video" and (s.get("disposition", {}) or {}).get("attached_pic") != 1), None)
+            if v_rot_s:
+                try:
+                    raw_r = v_rot_s.get("tags", {}).get("rotate")
+                    if raw_r is not None:
+                        rot_deg = int(round(float(raw_r)))
+                    else:
+                        for sd in v_rot_s.get("side_data_list", []):
+                            if "rotation" in sd:
+                                rot_deg = int(round(float(sd["rotation"])))
+                                break
+                except (ValueError, TypeError):
+                    rot_deg = 0
+            is_rotated_90 = (abs(rot_deg) % 180 == 90)
+            disp_w, disp_h = (height, width) if is_rotated_90 else (width, height)
+
             target_w, target_h = None, None
             max_w, max_h = None, None
-            if "4K" in res_choice or "2160" in res_choice:
-                max_w, max_h = (2160, 3840) if height > width else (3840, 2160)
+            if "4K DCI" in res_choice or "4096" in res_choice:
+                max_w, max_h = (2160, 4096) if disp_h > disp_w else (4096, 2160)
+            elif "4K" in res_choice or "2160" in res_choice:
+                max_w, max_h = (2160, 3840) if disp_h > disp_w else (3840, 2160)
             elif "1080" in res_choice:
-                max_w, max_h = (1080, 1920) if height > width else (1920, 1080)
+                max_w, max_h = (1080, 1920) if disp_h > disp_w else (1920, 1080)
             elif "720" in res_choice:
-                max_w, max_h = (720, 1280) if height > width else (1280, 720)
+                max_w, max_h = (720, 1280) if disp_h > disp_w else (1280, 720)
 
-            if max_w and max_h and width > 0 and height > 0:
-                if width > max_w or height > max_h:
-                    scale_f = min(max_w / float(width), max_h / float(height))
-                    target_w = int(round(width * scale_f / 2.0)) * 2
-                    target_h = int(round(height * scale_f / 2.0)) * 2
+            if max_w and max_h and disp_w > 0 and disp_h > 0:
+                if disp_w > max_w or disp_h > max_h:
+                    scale_f = min(max_w / float(disp_w), max_h / float(disp_h))
+                    target_w = int(round(disp_w * scale_f / 2.0)) * 2
+                    target_h = int(round(disp_h * scale_f / 2.0)) * 2
 
             has_alpha = any(a in pix_fmt_in for a in ("yuva", "rgba", "bgra", "argb", "abgr", "gbrpa", "gbrap", "ya8", "ya16"))
 
@@ -5990,7 +6294,7 @@ class EncoderApp:
                 else:
                     codec_name = "hevc_videotoolbox"
                     if has_alpha: profile_str, pix_fmt_str = None, "bgra"
-                    elif "4:2:2" in chroma_choice: profile_str, pix_fmt_str = "main42210", "p210le"
+                    elif "4:2:2" in chroma_choice and check_vt_422_support(): profile_str, pix_fmt_str = "main42210", "p210le"
                     elif "10-Bit" in chroma_choice: profile_str, pix_fmt_str = "main10", "p010le"
                     else: profile_str, pix_fmt_str = "main", "nv12"
             else:
@@ -6026,7 +6330,7 @@ class EncoderApp:
                 # Auto (Smart) mode:
                 # Retains MOV with uncompressed 24-bit PCM for Log/Master workflows (preserving Canon R5 4-ch PCM),
                 # but uses universal MP4 (AAC) when no PCM is present or for standard distribution presets.
-                is_master_wf = (preset_name in ("Log Footage", "Custom")) or ("4:2:2" in chroma_choice)
+                is_master_wf = (preset_name == "Log Footage") or ("4:2:2" in chroma_choice)
                 if has_alpha and not is_h264:
                     out_ext = ".mov"
                     keep_lpcm = False
@@ -6036,20 +6340,30 @@ class EncoderApp:
                 else:
                     out_ext = ".mp4"
                     keep_lpcm = False
+            folder_info = current_item.get("folder_info")
+            if folder_info:
+                with RESERVED_PATHS_LOCK:
+                    safe_top = folder_info["resolved"].get(dest_dir)
+                    if not safe_top:
+                        safe_top = get_safe_output_folder(folder_info["source_root"], dest_dir)
+                        folder_info["resolved"][dest_dir] = safe_top
+                sub_rel = current_item.get("sub_rel", "")
+                rel_dir = safe_top if not sub_rel else os.path.join(safe_top, sub_rel)
             settings_tag = get_settings_filename_tag(settings) if settings.get("tag_settings", False) else ""
             out_file, lock_file = generate_safe_output_path(f, dest_dir, rel_dir=rel_dir, ext=out_ext, suffix=settings_tag)
             with self.process_lock:
                 self.active_output_files[item_id] = (out_file, lock_file)
 
-            gop_size = max(48, int(round(fps * 3)))
-            min_keyint = max(1, int(round(fps)))
             audio_args = self.get_audio_args(f, probe_data=probe, keep_pcm=keep_lpcm)
             if not audio_args:
                 audio_args = ["-map", "0:a?", "-c:a", "copy"]
             subtitle_args = self.get_subtitle_args(f, probe_data=probe)
 
             range_ff, range_x265, color_space, color_prim, color_trc, master_display_str, cll_str = self.get_color_and_hdr_metadata(f, probe_data=probe)
-            v_codec_in = str(probe.get("streams", [{}])[0].get("codec_name", "")).lower() if probe.get("streams") else ""
+            v_s0_probe = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video" and (s.get("disposition", {}) or {}).get("attached_pic") != 1), None)
+            if not v_s0_probe:
+                v_s0_probe = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), None)
+            v_codec_in = str(v_s0_probe.get("codec_name", "")).lower() if v_s0_probe else ""
             is_nle_master = any(k in v_codec_in for k in ("prores", "dnxhd", "dnxhr"))
             preset_name = settings.get("preset", "")
             is_log_workflow = (preset_name == "Log Footage") or (preset_name == "Custom" and "10-Bit" in str(chroma_choice)) or ("log" in str(preset_name).lower())
@@ -6058,6 +6372,7 @@ class EncoderApp:
             is_pq = color_trc in ("smpte2084", "pq")
             is_hlg = color_trc in ("arib-std-b67", "hlg", "arib_std_b67")
             is_bt2020 = color_prim in ("bt2020", "bt2020-10", "bt2020-12", "bt2020_10", "bt2020_12")
+            is_p3 = str(color_prim).lower() in ("smpte431", "smpte432", "dci-p3", "dci_p3", "p3", "display-p3", "display_p3")
             wide_or_hdr = (is_pq or is_hlg) or is_bt2020 or bool(master_display_str or cll_str)
             if not wide_or_hdr and not is_log_workflow and range_ff != "full":
                 range_ff, range_x265 = ("tv", "limited")
@@ -6073,7 +6388,7 @@ class EncoderApp:
             ff_trc = FFMPEG_CANONICAL_TRC.get(str(color_trc).lower(), color_trc) if color_trc else ("smpte2084" if is_pq else ("arib-std-b67" if is_hlg else default_matrix))
             ff_space = FFMPEG_CANONICAL_SPACE.get(str(color_space).lower(), color_space) if color_space else ("bt2020nc" if wide_or_hdr else default_matrix)
 
-            if not wide_or_hdr:
+            if not wide_or_hdr and not is_p3 and not is_sd:
                 ff_prim = "bt709"
                 ff_trc = "bt709"
                 ff_space = "bt709"
@@ -6084,36 +6399,20 @@ class EncoderApp:
             range_num = 1 if range_ff == "full" else 0
 
             vf_filters = []
-            if target_w and target_h and (target_w != width or target_h != height):
-                vf_filters.append(f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd")
-            elif width % 2 != 0 or height % 2 != 0:
+            if not has_alpha and (width > 0 and height > 0):
+                sp_pre = [f"range={range_ff}"]
+                if ff_prim: sp_pre.append(f"color_primaries={ff_prim}")
+                if ff_trc: sp_pre.append(f"color_trc={ff_trc}")
+                if ff_space: sp_pre.append(f"colorspace={ff_space}")
+                vf_filters.append(f"setparams={':'.join(sp_pre)}")
+
+            if target_w and target_h and (target_w != disp_w or target_h != disp_h):
+                vf_filters.append(f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int")
+            elif disp_w % 2 != 0 or disp_h % 2 != 0:
                 vf_filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic")
-
-            is_adaptive_denoise = bool(settings.get("denoise", False))
-            if is_adaptive_denoise and not has_alpha and (width > 0 and height > 0):
-                is_10bit = ("10-Bit" in chroma_choice)
-                is_422 = ("4:2:2" in chroma_choice)
-                if is_10bit and is_422:
-                    yuv_fmt, yuva_fmt = "yuv422p10le", "yuva422p10le"
-                elif is_10bit:
-                    yuv_fmt, yuva_fmt = "yuv420p10le", "yuva420p10le"
-                else:
-                    yuv_fmt, yuva_fmt = "yuv420p", "yuva420p"
-
-                c_rad = 6 if max(width, height) >= 7000 else (4 if max(width, height) >= 3000 else 2)
-                denoise_subgraph = (
-                    f"atadenoise=0a=0.008:0b=0.016:s=5:p=1:a=p,format={yuv_fmt},"
-                    f"split=3[dn_orig][dn_in][dn_mask];"
-                    f"[dn_in]avgblur=sizeX={c_rad}:planes=6[dn_filt];"
-                    f"[dn_mask]lutyuv=y='(0.30*maxval-val)*12.5'[dn_m];"
-                    f"[dn_filt][dn_m]mergeplanes=mapping=0x00010210:format={yuva_fmt}[dn_alpha];"
-                    f"[dn_orig][dn_alpha]overlay=format=auto,format={yuv_fmt}"
-                )
-                vf_filters.append(denoise_subgraph)
 
             # Emulate Apple AVAssetExportSession: auto-pad video tail to audio duration & conform low/VFR framerates
             has_vid = (width > 0 and height > 0)
-            v_s0_probe = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video" and (s.get("disposition", {}) or {}).get("attached_pic") != 1), None)
             v_stream_dur = 0.0
             if v_s0_probe:
                 try: v_stream_dur = float(v_s0_probe.get("duration", 0) or 0)
@@ -6135,7 +6434,7 @@ class EncoderApp:
                         if nb_f > 0: v_stream_dur = nb_f / float(fps)
                     except Exception: pass
 
-            # Framerate conforming & target FPS logic
+            # Framerate conforming & target FPS logic (placed before denoise so dropped frames are not denoised)
             orig_fps = fps
             is_vfr = bool(v_s0_probe and "vfr" in get_frame_rate_mode(v_s0_probe).lower())
             is_low = (fps < 23.976)
@@ -6181,12 +6480,59 @@ class EncoderApp:
                 target_fps = 29.97 if (is_low or is_ntsc_2997) else (30.0 if (is_vfr and abs(fps - 30.0) < 1.0) else fps)
 
             if target_fps and has_vid and (abs(target_fps - fps) > 0.005 or is_vfr or is_low):
-                vf_filters.append(f"fps=fps={target_fps}:round=near")
+                if abs(target_fps - 29.97) < 0.03:
+                    fps_filter_val = "30000/1001"
+                elif abs(target_fps - 23.976) < 0.03:
+                    fps_filter_val = "24000/1001"
+                elif abs(target_fps - 59.94) < 0.03:
+                    fps_filter_val = "60000/1001"
+                else:
+                    fps_filter_val = f"{target_fps}"
+                vf_filters.append(f"fps=fps={fps_filter_val}:round=near")
                 if is_vfr or is_low:
                     self.append_log(f"ℹ️ [CFR CONFORM] Variable/Low framerate ({fps:.2f} fps) conformed to {target_fps:.2f} fps CFR for FCP compatibility.\n")
                 else:
                     self.append_log(f"ℹ️ [FRAMERATE] Converted framerate from {fps:.2f} fps to {target_fps:.2f} fps.\n")
                 fps = target_fps
+
+            gop_size = max(24, int(round(fps)))
+            min_keyint = max(1, int(round(fps * 0.5)))
+
+            denoise_raw = settings.get("denoise", False)
+            if denoise_raw in ("light", "Denoise: Light"):
+                denoise_mode = "light"
+            elif denoise_raw in (True, "full", "Denoise: Full", "standard"):
+                denoise_mode = "full"
+            else:
+                denoise_mode = "off"
+            is_adaptive_denoise = (denoise_mode != "off")
+            if is_adaptive_denoise and not has_alpha and (width > 0 and height > 0):
+                is_10bit = ("10-Bit" in chroma_choice)
+                is_422 = ("4:2:2" in chroma_choice)
+                if is_10bit and is_422:
+                    yuv_fmt, c_scale = "yuv422p10le", "iw/2:ih"
+                elif is_10bit:
+                    yuv_fmt, c_scale = "yuv420p10le", "iw/2:ih/2"
+                else:
+                    yuv_fmt, c_scale = "yuv420p", "iw/2:ih/2"
+
+                eff_w = target_w or disp_w
+                eff_h = target_h or disp_h
+                c_sigma = 3.6 if max(eff_w, eff_h) >= 7000 else (2.6 if max(eff_w, eff_h) >= 3000 else 1.8)
+                if denoise_mode == "light":
+                    c_sigma = round(c_sigma * 0.70, 2)
+                ata_a = "0.005" if denoise_mode == "light" else "0.008"
+                ata_b = "0.010" if denoise_mode == "light" else "0.016"
+                denoise_subgraph = (
+                    f"format={yuv_fmt},atadenoise=0a={ata_a}:0b={ata_b}:s=5:p=1:a=p,"
+                    f"split=3[dn_orig][dn_in][dn_mask];"
+                    f"[dn_in]gblur=sigma={c_sigma}:steps=2:planes=6[dn_filt];"
+                    f"[dn_mask]lutyuv=y='(0.30*maxval-val)*12.5',extractplanes=y,split=2[dn_my][dn_mc_in];"
+                    f"[dn_mc_in]scale={c_scale}:flags=bilinear[dn_mc];"
+                    f"[dn_my][dn_mc]mergeplanes=mapping=0x001010:format={yuv_fmt}[dn_m];"
+                    f"[dn_orig][dn_filt][dn_m]maskedmerge=planes=6"
+                )
+                vf_filters.append(denoise_subgraph)
 
             if has_vid and v_stream_dur > 0 and duration > (v_stream_dur + 0.08):
                 tail_pad = duration - v_stream_dur
@@ -6216,11 +6562,12 @@ class EncoderApp:
                     self.append_log(f"ℹ️ [INFO] Input '{display_name}' has premultiplied alpha (alpha_mode: {alpha_mode_raw}). Omitting premultiply filter.\n")
                 vf_filters.append(f"format={pix_fmt_str}")
             else:
-                sp_parts = [f"range={range_ff}"]
-                if ff_prim: sp_parts.append(f"color_primaries={ff_prim}")
-                if ff_trc: sp_parts.append(f"color_trc={ff_trc}")
-                if ff_space: sp_parts.append(f"colorspace={ff_space}")
-                vf_filters.append(f"setparams={':'.join(sp_parts)}")
+                if not vf_filters or not vf_filters[-1].startswith("setparams="):
+                    sp_parts = [f"range={range_ff}"]
+                    if ff_prim: sp_parts.append(f"color_primaries={ff_prim}")
+                    if ff_trc: sp_parts.append(f"color_trc={ff_trc}")
+                    if ff_space: sp_parts.append(f"colorspace={ff_space}")
+                    vf_filters.append(f"setparams={':'.join(sp_parts)}")
 
             hdr_tag = " [HDR]" if (is_pq or is_hlg or master_display_str) else ""
             cap_info = f"CQ:{q_val}" if is_videotoolbox else f"CRF:{q_val}"
@@ -6232,8 +6579,9 @@ class EncoderApp:
             res_lbl = get_common_resolution_label(width, height).strip(" ()") or f"{width}x{height}"
             enc_name = "AppleMediaEngine" if is_videotoolbox else "CPU (Software)"
             audio_tag_str = "24-Bit LPCM" if keep_lpcm else ("AAC" if audio_args else "None")
-            scale_log = f" • Scale: {target_w}x{target_h} [Lanczos]" if (target_w and target_h and target_w != width) else ""
-            denoise_log = " • Denoise: Organic Luma Grain + Luma-Gated Shadow Chroma Diffusion (C-Log Optimized)" if is_adaptive_denoise and not has_alpha else ""
+            scale_log = f" • Scale: {target_w}x{target_h} [Lanczos]" if (target_w and target_h and target_w != disp_w) else ""
+            dn_desc = "Light (s=5, 0a=0.005)" if denoise_mode == "light" else "Full (s=5, 0a=0.008)"
+            denoise_log = f" • Denoise: {dn_desc} Organic Luma Grain + Luma-Gated Shadow Chroma Diffusion (C-Log Optimized)" if is_adaptive_denoise and not has_alpha else ""
             self.append_log(
                 f"\n▶ [START] {display_name}\n"
                 f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info}{scale_log}{denoise_log} • Audio: {audio_tag_str}\n"
@@ -6245,14 +6593,15 @@ class EncoderApp:
             in_codec = ""
             in_profile = ""
             if is_videotoolbox and has_video:
-                v_s = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), {})
+                v_s = v_s0_probe or next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), {})
                 in_codec = str(v_s.get("codec_name", "")).lower()
                 in_profile = str(v_s.get("profile", "")).lower()
 
             is_10bit = any(x in pix_fmt_in for x in ("10le", "10be", "p010", "p210", "10")) or ("10" in in_profile)
             is_h264_input = in_codec in ("h264", "avc", "avc1")
+            is_true_hdr = (is_pq or bool(master_display_str or cll_str))
             can_hwaccel_dec = (
-                has_video and not wide_or_hdr and range_ff != "full" and not has_alpha and not is_vfr_or_low and not is_h264_input and (
+                has_video and not is_true_hdr and not has_alpha and not is_vfr_or_low and not is_h264_input and (
                     ("hevc" in in_codec or "h265" in in_codec) or
                     ("prores" in in_codec)
                 )
@@ -6261,19 +6610,27 @@ class EncoderApp:
             cmd = [FFMPEG_BIN, "-hide_banner", "-nostdin", "-y", "-nostats", "-progress", "pipe:1"]
             if is_videotoolbox and can_hwaccel_dec:
                 cmd.extend(["-hwaccel", "videotoolbox"])
-            elif is_videotoolbox and wide_or_hdr and has_video:
+            elif is_videotoolbox and is_true_hdr and has_video:
                 self.append_log(f"ℹ️ [INFO] HDR stream detected for '{display_name}'. Using software decoding to preserve HDR10 mastering display and light level side data.\n")
             elif is_videotoolbox and is_h264_input and has_video:
                 self.append_log(f"ℹ️ [INFO] H.264 input detected for '{display_name}'. Using software decoding to prevent VideoToolbox decode stutter.\n")
+            total_cpus = os.cpu_count() or 8
             if is_videotoolbox:
-                threads_per_proc = "4"
+                if (is_adaptive_denoise and not has_alpha) or not can_hwaccel_dec or (target_w and target_h):
+                    budget_est = self.get_concurrency_budget(encoder=encoder_choice)
+                    is_8k_est = (width >= 7000 or height >= 4000)
+                    active_jobs_est = 1 if getattr(self, "concurrency_mode", "Balanced") == "Sequential" else (max(1, min(budget_est["max_8k"], budget_est["max_jobs"])) if is_8k_est else max(1, budget_est["max_jobs"]))
+                    threads_per_proc = str(max(4, min(16, total_cpus // active_jobs_est)))
+                else:
+                    threads_per_proc = "4"
             else:
-                total_cpus = os.cpu_count() or 8
                 budget = self.get_concurrency_budget(encoder=encoder_choice)
                 threads_per_proc = str(max(2, total_cpus // max(1, budget["max_jobs"])))
             v_map_args = ["-map", "0:V:0?"] if has_video else ["-vn"]
             cmd.extend([
                 "-threads", threads_per_proc,
+                "-filter_threads", threads_per_proc,
+                "-filter_complex_threads", threads_per_proc,
                 "-i", f
             ] + v_map_args + [
                 "-map", "-0:d?", "-map", "-0:t?",
@@ -6289,7 +6646,7 @@ class EncoderApp:
                     if ";" in tc_str and not (29.9 < fps < 30.05 or 59.9 < fps < 60.05): tc_str = tc_str.replace(";", ":")
                     if re.match(r"^\d{2}:\d{2}:\d{2}[:;]\d{2}$", tc_str): cmd.extend(["-timecode", tc_str])
 
-                cmd.extend(["-sws_flags", "lanczos+accurate_rnd"])
+                cmd.extend(["-sws_flags", "lanczos+accurate_rnd+full_chroma_int"])
                 if vf_filters: cmd.extend(["-vf", ",".join(vf_filters)])
 
                 cmd.extend(["-c:v", codec_name])
@@ -6310,7 +6667,7 @@ class EncoderApp:
                     if has_alpha:
                         cmd.extend(["-alpha_quality", "0.75"])
                     vt_extra = (
-                        (["-spatial_aq", "1"] if HAS_VT_SPATIAL_AQ else []) +
+                        (["-spatial_aq", "1"] if check_vt_spatial_aq_support() else []) +
                         ["-prio_speed", "0", "-realtime", "0", "-power_efficient", "0"]
                     )
                     cmd.extend(["-q:v", str(q_val)] + vt_extra + ["-g", str(gop_size)] + tag_args + ["-movflags", movflags_str, "-strict", "experimental"])
@@ -6350,6 +6707,7 @@ class EncoderApp:
                 with self.hw_launch_lock:
                     with self.process_lock:
                         if item_id in self.cancelled_ids or self.cancel_requested:
+                            is_cancelled = True
                             self.retrying_ids.discard(item_id)
                             with self.queue_lock: current_item["status"] = "cancelled"
                             self.update_item_status_ui(item_id, "cancelled", refresh_stats=True)
@@ -6367,6 +6725,7 @@ class EncoderApp:
                 with self.process_lock:
                     self.active_processes[item_id] = proc
                     if item_id in self.cancelled_ids or self.cancel_requested:
+                        is_cancelled = True
                         safe_killpg(proc, signal.SIGCONT, signal.SIGKILL)
                         try:
                             proc.wait(timeout=0.3)
@@ -6436,7 +6795,7 @@ class EncoderApp:
 
                 v_s0 = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video" and (s.get("disposition", {}) or {}).get("attached_pic") != 1), None)
                 total_frames = 0
-                if is_vfr_or_low and duration > 0 and fps > 0:
+                if (is_vfr_or_low or abs(fps - orig_fps) > 0.005) and duration > 0 and fps > 0:
                     total_frames = int(round(duration * fps))
                 elif v_s0:
                     try: total_frames = int(v_s0.get("nb_frames") or 0)
@@ -6447,6 +6806,9 @@ class EncoderApp:
                 cur_sec, raw_time_sec, cur_frame = 0.0, 0.0, 0
                 max_cur_sec, max_pct = 0.0, 0.0
                 speed, fps_display, last_progress_push = "1.0x", "0", 0.0
+                rate_window = deque()
+                last_sample_frame, last_sample_sec = 0, 0.0
+                inst_fps_ema, inst_speed_ema = None, None
                 for line in iter(proc.stdout.readline, ''):
                     if not line: break
                     first_frame_seen[0] = True
@@ -6471,7 +6833,46 @@ class EncoderApp:
                             try: fps_display = f"{float(v):.0f}"
                             except ValueError: fps_display = v or "0"
                         elif k == "progress":
-                            now_t = time.time()
+                            now_t = time.monotonic()
+                            active_t = self._get_item_active_time(item_id)
+                            if has_video and total_frames > 0:
+                                raw_pct = min(99.9, max(0.0, (cur_frame / float(total_frames)) * 100.0))
+                                v_sec = (cur_frame / float(fps)) if fps > 0 else raw_time_sec
+                                cur_sec = max(max_cur_sec, v_sec if v_sec > 0 else raw_time_sec)
+                            else:
+                                cur_sec = max(max_cur_sec, raw_time_sec)
+                                raw_pct = min(99.9, max(0.0, (cur_sec / duration) * 100.0)) if duration > 0 else 0.0
+                            pct = max(max_pct, raw_pct)
+                            max_pct = pct
+                            max_cur_sec = cur_sec
+                            progressed = (cur_frame > last_sample_frame) if has_video else (cur_sec > last_sample_sec + 0.001)
+                            if progressed:
+                                rate_window.append((active_t, cur_frame, cur_sec))
+                                last_sample_frame = cur_frame
+                                last_sample_sec = cur_sec
+                                while len(rate_window) > 2 and (rate_window[-1][0] - rate_window[1][0]) >= 4.0:
+                                    rate_window.popleft()
+                            inst_fps, inst_speed = None, None
+                            if len(rate_window) >= 2:
+                                t0, f0, s0 = rate_window[0]
+                                t1, f1, s1 = rate_window[-1]
+                                dt = (active_t - t0) if (active_t - t1) > 1.5 else (t1 - t0)
+                                if dt > 0.05:
+                                    if has_video and f1 > f0:
+                                        inst_fps = (f1 - f0) / dt
+                                    if s1 > s0:
+                                        inst_speed = (s1 - s0) / dt
+                                    elif has_video and f1 > f0 and fps > 0:
+                                        inst_speed = ((f1 - f0) / fps) / dt
+                            if inst_fps is not None:
+                                inst_fps_ema = inst_fps if inst_fps_ema is None else (0.5 * inst_fps + 0.5 * inst_fps_ema)
+                                fps_display = f"{inst_fps_ema:.0f}" if inst_fps_ema >= 10.0 else f"{inst_fps_ema:.1f}"
+                            try: sp_val = float(speed.replace("x", "").strip())
+                            except ValueError: sp_val = 0.0
+                            if inst_speed is not None and inst_speed > 0:
+                                inst_speed_ema = inst_speed if inst_speed_ema is None else (0.4 * inst_speed + 0.6 * inst_speed_ema)
+                                sp_val = inst_speed_ema
+                                speed = f"{sp_val:.1f}x" if sp_val >= 10.0 else (f"{sp_val:.2f}x" if sp_val >= 1.0 else f"{sp_val:.3f}x")
                             if v == "end":
                                 max_pct = 100.0
                                 cur_sec = duration if duration > 0 else max_cur_sec
@@ -6481,20 +6882,8 @@ class EncoderApp:
                                 self.update_item_status_ui(item_id, "encoding", "100%")
                                 break
                             else:
-                                if (now_t - last_progress_push) >= 0.25:
+                                if (now_t - last_progress_push) >= 0.5:
                                     last_progress_push = now_t
-                                    if has_video and total_frames > 0:
-                                        raw_pct = min(99.9, max(0.0, (cur_frame / float(total_frames)) * 100.0))
-                                        v_sec = (cur_frame / float(fps)) if fps > 0 else raw_time_sec
-                                        cur_sec = max(max_cur_sec, v_sec if v_sec > 0 else raw_time_sec)
-                                    else:
-                                        cur_sec = max(max_cur_sec, raw_time_sec)
-                                        raw_pct = min(99.9, max(0.0, (cur_sec / duration) * 100.0)) if duration > 0 else 0.0
-                                    pct = max(max_pct, raw_pct)
-                                    max_pct = pct
-                                    max_cur_sec = cur_sec
-                                    try: sp_val = float(speed.replace("x", "").strip())
-                                    except ValueError: sp_val = 0.0
                                     eta_str = format_eta_str(max(0.0, (duration - cur_sec) / sp_val)) if (sp_val > 0 and cur_sec < duration) else "ETA: --:--"
                                     show_hours = (duration >= 3600) or (cur_sec >= 3600)
                                     t_str = f"Time: {format_time_duration(cur_sec, show_hours)} / {format_time_duration(duration, show_hours)}"
@@ -6543,7 +6932,7 @@ class EncoderApp:
                                 break
                         subtitle_args = []
                         continue
-                    if "-hwaccel" in cmd and any(k in stderr_dump.lower() for k in ("decode", "hwaccel", "vt hardware decode", "videotoolbox decoding")):
+                    if "-hwaccel" in cmd and any(k in stderr_dump.lower() for k in ("decode", "hwaccel", "vt hardware decode", "videotoolbox decoding", "videotoolbox format", "failed to map underlying", "decompression session")):
                         hw_idx = cmd.index("-hwaccel")
                         del cmd[hw_idx:hw_idx + 2]
                         self.append_log(f"⚠️ Retrying '{display_name}' using software decoding...\n")
@@ -6575,7 +6964,7 @@ class EncoderApp:
 
             if exit_code == 0:
                 self._dispatcher_crash_count = 0
-                stats_str = ""
+                stats_str, orig_sz, new_sz = "", 0, 0
                 try:
                     orig_sz = os.path.getsize(f) if (f and os.path.exists(f)) else 0
                     new_sz = os.path.getsize(out_file) if (out_file and os.path.exists(out_file)) else 0
@@ -6597,6 +6986,11 @@ class EncoderApp:
                     stats_str = ""
                     self.append_log(f"✔ [COMPLETE] {display_name}\n")
                 with self.queue_lock:
+                    if orig_sz > 0 and new_sz > 0:
+                        self._batch_orig_bytes += orig_sz
+                        self._batch_new_bytes += new_sz
+                    self._batch_completed_count += 1
+                    current_item["output_path"] = out_file
                     current_item["pending_done_stats"] = stats_str
                 with self.process_lock:
                     self.active_output_files.pop(item_id, None)
@@ -6632,6 +7026,7 @@ class EncoderApp:
                 self.running_ids.discard(item_id)
                 self.suspended_ids.discard(item_id)
                 self.cancelled_ids.discard(item_id)
+                self.item_hold_state.pop(item_id, None)
                 if active_proc and active_proc.poll() is None:
                     safe_killpg(active_proc, signal.SIGCONT, signal.SIGKILL)
                     try:
@@ -6676,7 +7071,7 @@ def main():
             if found:
                 has_folder = any(os.path.isdir(x) for x in found)
                 is_cold_start = (time.time() - getattr(app, "_startup_time", 0.0)) < 1.2
-                should_inspect = (not is_cold_start) and (not has_folder) and (app.tabview.get() == "Media Inspector" or app.is_option_held())
+                should_inspect = (not is_cold_start) and (not has_folder) and (app.tabview.get() == "Media Inspector")
                 if should_inspect:
                     def _do_inspect():
                         app.tabview.set("Media Inspector")
