@@ -269,6 +269,7 @@ THEME_FILE = os.path.join(USER_PRESETS_DIR, "theme_color.txt")
 CONCURRENCY_FILE = os.path.join(USER_PRESETS_DIR, "concurrency.txt")
 AUTO_START_FILE = os.path.join(USER_PRESETS_DIR, "auto_start.txt")
 TAG_SETTINGS_FILE = os.path.join(USER_PRESETS_DIR, "tag_settings.txt")
+QUEUE_STATE_FILE = os.path.join(USER_PRESETS_DIR, "queue_state.json")
 
 SUPPORTED_EXTENSIONS = (
     ".mp4", ".mov", ".mkv", ".m4v", ".avi",
@@ -854,7 +855,74 @@ def release_output_path(path):
         with RESERVED_PATHS_LOCK:
             RESERVED_OUTPUT_PATHS.discard(os.path.abspath(path))
 
-def generate_safe_output_path(source_file, dest_folder, rel_dir="", ext=".mp4", suffix=""):
+def is_valid_encoded_file(filepath):
+    try:
+        if not filepath or not os.path.isfile(filepath) or os.path.getsize(filepath) <= 0:
+            return False
+        res = subprocess.run(
+            [FFPROBE_BIN, "-v", "error", "-show_format", "-show_streams", "-of", "json", filepath],
+            capture_output=True, text=True, timeout=10
+        )
+        if res.returncode != 0 or not res.stdout.strip():
+            return False
+        data = json.loads(res.stdout)
+        streams = data.get("streams", [])
+        if not streams:
+            return False
+        dur = 0.0
+        try:
+            dur = float(data.get("format", {}).get("duration") or 0)
+        except (ValueError, TypeError):
+            dur = 0.0
+        if dur <= 0:
+            for s in streams:
+                try:
+                    dur = max(dur, float(s.get("duration") or 0))
+                except (ValueError, TypeError):
+                    pass
+        return dur > 0.0
+    except Exception:
+        return False
+
+def find_existing_output_folders(source_dir, dest_root):
+    dest_root = os.path.expanduser(dest_root)
+    if not os.path.isdir(dest_root):
+        return []
+    base_name = os.path.basename(os.path.normpath(source_dir)) or "Encoded_Output"
+    src_abs = os.path.abspath(source_dir)
+    matches = []
+    try:
+        for entry in os.listdir(dest_root):
+            if entry == base_name or (entry.startswith(base_name + " ") and entry[len(base_name) + 1:].isdigit()):
+                cand = os.path.join(dest_root, entry)
+                if os.path.isdir(cand) and os.path.abspath(cand) != src_abs:
+                    has_files = any(not fn.startswith(".") for _, _, fns in os.walk(cand) for fn in fns)
+                    if has_files:
+                        matches.append(entry)
+    except Exception:
+        pass
+    matches.sort(key=lambda n: os.path.getmtime(os.path.join(dest_root, n)), reverse=True)
+    return matches
+
+def find_existing_encoded_match(target_dir, source_file, settings):
+    if not os.path.isdir(target_dir):
+        return None
+    stem, _ = os.path.splitext(os.path.basename(source_file))
+    stems = []
+    if settings and settings.get("tag_settings", False):
+        tag = get_settings_filename_tag(settings)
+        if tag:
+            stems.append(f"{stem} [{tag.strip()}]")
+    stems.append(stem)
+    src_abs = os.path.abspath(source_file)
+    for s in stems:
+        for ext in (".mov", ".mp4", ".MOV", ".MP4"):
+            cand = os.path.join(target_dir, f"{s}{ext}")
+            if os.path.isfile(cand) and os.path.abspath(cand) != src_abs:
+                return cand
+    return None
+
+def generate_safe_output_path(source_file, dest_folder, rel_dir="", ext=".mp4", suffix="", replace_corrupt=False):
     dest_folder = os.path.expanduser(dest_folder)
     target_dir = os.path.join(dest_folder, rel_dir) if rel_dir else dest_folder
     os.makedirs(target_dir, exist_ok=True)
@@ -871,9 +939,18 @@ def generate_safe_output_path(source_file, dest_folder, rel_dir="", ext=".mp4", 
                 counter += 1
                 continue
 
-            if not os.path.exists(candidate) and abs_cand not in RESERVED_OUTPUT_PATHS:
-                RESERVED_OUTPUT_PATHS.add(abs_cand)
-                return candidate, abs_cand
+            if abs_cand not in RESERVED_OUTPUT_PATHS:
+                if not os.path.exists(candidate):
+                    RESERVED_OUTPUT_PATHS.add(abs_cand)
+                    return candidate, abs_cand
+                elif replace_corrupt and counter == 0 and not is_valid_encoded_file(candidate):
+                    try:
+                        os.remove(candidate)
+                    except OSError:
+                        pass
+                    if not os.path.exists(candidate):
+                        RESERVED_OUTPUT_PATHS.add(abs_cand)
+                        return candidate, abs_cand
             counter += 1
     raise RuntimeError(f"Could not generate safe output path in {target_dir}")
 
@@ -2525,6 +2602,8 @@ class EncoderApp:
         self.root.bind_all("<Command-a>", self._on_select_all_key, add="+")
         self.root.bind_all("<Control-a>", self._on_select_all_key, add="+")
 
+        self._closing_app = False
+        self.load_queue_state()
         self.root.after(100, self.preflight_check)
         self.root.after(30, self._process_ui_queue)
 
@@ -3115,11 +3194,15 @@ class EncoderApp:
         with self.process_lock: has_running = bool(self.active_processes or self.retrying_ids or self.suspended_ids)
         if self.is_running and has_running:
             if messagebox.askyesno("Quit MediaEngine", "Encodes are in progress. Stop them and quit?"):
+                self._closing_app = True
                 self.cancel_requested = True
+                self.save_queue_state()
                 self.kill_own_processes()
                 cleanup_system_ffmpeg()
                 self.root.destroy()
         else:
+            self._closing_app = True
+            self.save_queue_state()
             self.kill_own_processes()
             cleanup_system_ffmpeg()
             self.root.destroy()
@@ -4843,6 +4926,8 @@ class EncoderApp:
                     dstats = item.get("done_stats", "")
                 self.canvas_queue.update_item_status(item_id, "completed", done_stats=dstats)
                 self._update_queue_stats()
+                if not getattr(self, "_closing_app", False):
+                    self.save_queue_state()
 
     def set_app_state(self, state):
         self.ui_queue.put(("app_state", state))
@@ -5131,11 +5216,139 @@ class EncoderApp:
             "denoise": self._denoise_label_to_val(self.denoise_var.get()) if hasattr(self, "denoise_var") else (preset_name in ("Log Footage", "Non-Log Footage"))
         }
 
+    def save_queue_state(self):
+        try:
+            with self.queue_lock:
+                if not self.queue_items:
+                    if os.path.exists(QUEUE_STATE_FILE):
+                        try:
+                            os.remove(QUEUE_STATE_FILE)
+                        except OSError:
+                            pass
+                    return
+                serialized = []
+                for item in self.queue_items:
+                    st = item.get("status", "queued")
+                    if st in ("encoding", "suspended"):
+                        st = "queued"
+                    fi = item.get("folder_info")
+                    fi_copy = {
+                        "source_root": fi.get("source_root", ""),
+                        "resolved": dict(fi.get("resolved", {})),
+                        "resumed": bool(fi.get("resumed", False))
+                    } if fi else None
+                    serialized.append({
+                        "path": item.get("path", ""),
+                        "rel_dir": item.get("rel_dir", ""),
+                        "folder_info": fi_copy,
+                        "sub_rel": item.get("sub_rel", ""),
+                        "filename": item.get("filename", ""),
+                        "display_name": item.get("display_name", ""),
+                        "settings": dict(item.get("settings", {})),
+                        "status": st,
+                        "done_stats": item.get("done_stats", ""),
+                        "output_path": item.get("output_path"),
+                        "replace_corrupt": bool(item.get("replace_corrupt", False)),
+                    })
+            os.makedirs(USER_PRESETS_DIR, exist_ok=True)
+            tmp_path = QUEUE_STATE_FILE + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(serialized, f, indent=2)
+            os.replace(tmp_path, QUEUE_STATE_FILE)
+        except Exception:
+            pass
+
+    def load_queue_state(self):
+        try:
+            if not os.path.exists(QUEUE_STATE_FILE):
+                return
+            with open(QUEUE_STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list) or not data:
+                return
+            folder_cache = {}
+            restored = 0
+            with self.queue_lock:
+                for entry in data:
+                    p = entry.get("path", "")
+                    if not p or not os.path.exists(p):
+                        continue
+                    fi_raw = entry.get("folder_info")
+                    fi_obj = None
+                    if isinstance(fi_raw, dict) and fi_raw.get("source_root"):
+                        res_items = tuple(sorted((fi_raw.get("resolved") or {}).items()))
+                        fkey = (fi_raw["source_root"], res_items)
+                        fi_obj = folder_cache.get(fkey)
+                        if fi_obj is None:
+                            fi_obj = {
+                                "source_root": fi_raw["source_root"],
+                                "resolved": dict(fi_raw.get("resolved") or {}),
+                                "resumed": bool(fi_raw.get("resumed", True))
+                            }
+                            folder_cache[fkey] = fi_obj
+                    st = entry.get("status", "queued")
+                    if st not in ("queued", "completed", "failed", "cancelled"):
+                        st = "queued"
+                    self.item_counter += 1
+                    item_data = {
+                        "id": self.item_counter,
+                        "path": p,
+                        "rel_dir": entry.get("rel_dir", ""),
+                        "folder_info": fi_obj,
+                        "sub_rel": entry.get("sub_rel", ""),
+                        "filename": entry.get("filename") or os.path.basename(p),
+                        "display_name": entry.get("display_name") or os.path.basename(p),
+                        "settings": dict(entry.get("settings") or self.get_current_settings()),
+                        "status": st,
+                        "progress_text": None,
+                        "done_stats": entry.get("done_stats", ""),
+                        "replace_corrupt": bool(entry.get("replace_corrupt", st == "queued"))
+                    }
+                    if entry.get("output_path"):
+                        item_data["output_path"] = entry["output_path"]
+                    self.queue_items.append(item_data)
+                    self.items_by_id[self.item_counter] = item_data
+                    restored += 1
+            if restored > 0:
+                self.canvas_queue.set_items(list(self.queue_items))
+                self._update_queue_stats()
+                q_cnt = sum(1 for q in self.queue_items if q["status"] == "queued")
+                self.append_log(f"[INFO] Restored previous session ({restored} item(s), {q_cnt} queued).\n")
+        except Exception:
+            pass
+
     def handle_incoming_files(self, files):
         job_settings = self.get_current_settings()
+        dest_dir_check = job_settings.get("dest_dir", os.path.expanduser("~/Desktop"))
+        resume_folder_map = {}
+        filtered_files = []
+        for f_in in files:
+            clean_in = clean_file_path(f_in)
+            if not clean_in:
+                continue
+            if os.path.isdir(clean_in):
+                c_abs = os.path.abspath(clean_in)
+                existing_outs = find_existing_output_folders(c_abs, dest_dir_check)
+                if existing_outs:
+                    cand_name = existing_outs[0]
+                    ans = messagebox.askyesnocancel(
+                        "Existing Output Folder Found",
+                        f"Output folder '{cand_name}' already exists in:\n{dest_dir_check}\n\n"
+                        f"• Yes: Resume into '{cand_name}' (skip completed videos, replace incomplete/corrupt files)\n"
+                        f"• No: Create a new output folder\n"
+                        f"• Cancel: Skip adding this folder"
+                    )
+                    if ans is None:
+                        continue
+                    elif ans is True:
+                        resume_folder_map[c_abs] = cand_name
+            filtered_files.append(f_in)
+        if not filtered_files:
+            return
+        files = filtered_files
         with self.queue_lock: self.active_scans += 1
 
-        def scan_worker(settings=job_settings):
+        def scan_worker(settings=job_settings, resume_map=resume_folder_map):
             batch_chunk = []
             total_added = 0
             batch_seen = set()
@@ -5146,20 +5359,54 @@ class EncoderApp:
                 if not batch_chunk: return
                 start_dispatcher = False
                 added_count = 0
+                queued_added = 0
                 prepared_items = []
                 for v_path, v_rel, f_info, s_rel in batch_chunk:
                     if v_path in batch_seen: continue
                     batch_seen.add(v_path)
                     file_name = os.path.basename(v_path)
                     disp_name = os.path.join(v_rel, file_name) if v_rel else file_name
+                    item_status = "queued"
+                    item_out_path = None
+                    item_done_stats = ""
+                    replace_corrupt = False
+
+                    if f_info and f_info.get("resumed"):
+                        res_name = f_info["resolved"].get(dest_dir)
+                        if res_name:
+                            target_dir = os.path.join(dest_dir, res_name, s_rel) if s_rel else os.path.join(dest_dir, res_name)
+                            existing_out = find_existing_encoded_match(target_dir, v_path, settings)
+                            if existing_out:
+                                if is_valid_encoded_file(existing_out):
+                                    item_status = "completed"
+                                    item_out_path = existing_out
+                                    try:
+                                        orig_sz = os.path.getsize(v_path) if os.path.exists(v_path) else 0
+                                        new_sz = os.path.getsize(existing_out)
+                                        if orig_sz > 0 and new_sz > 0:
+                                            diff_pct = ((orig_sz - new_sz) / float(orig_sz)) * 100.0
+                                            pval = round(abs(diff_pct), 1)
+                                            pnum = f"{int(pval)}%" if pval.is_integer() else f"{pval:.1f}%"
+                                            pct_str = f"-{pnum}" if diff_pct >= 0 else f"+{pnum}"
+                                            item_done_stats = f"• {format_bytes(new_sz)} ({pct_str}) • Resumed"
+                                        else:
+                                            item_done_stats = "• Resumed"
+                                    except Exception:
+                                        item_done_stats = "• Resumed"
+                                else:
+                                    replace_corrupt = True
+                                    self.append_log(f"⚠️ [RESUME] Incomplete/corrupt file '{os.path.basename(existing_out)}' will be replaced for '{disp_name}'.\n")
 
                     item_data = {
                         "path": v_path, "rel_dir": v_rel,
                         "folder_info": f_info, "sub_rel": s_rel,
                         "filename": file_name, "display_name": disp_name,
-                        "settings": dict(settings), "status": "queued", "progress_text": None,
-                        "done_stats": ""
+                        "settings": dict(settings), "status": item_status, "progress_text": None,
+                        "done_stats": item_done_stats,
+                        "replace_corrupt": replace_corrupt
                     }
+                    if item_out_path:
+                        item_data["output_path"] = item_out_path
                     prepared_items.append(item_data)
 
                 with self.process_lock:
@@ -5170,8 +5417,10 @@ class EncoderApp:
                             self.queue_items.append(item_data)
                             self.items_by_id[self.item_counter] = item_data
                             added_count += 1
+                            if item_data["status"] == "queued":
+                                queued_added += 1
 
-                        if not self.dispatcher_alive and not self.is_running and added_count > 0 and getattr(self, "auto_start", False):
+                        if not self.dispatcher_alive and not self.is_running and queued_added > 0 and getattr(self, "auto_start", False):
                             self.dispatcher_alive = True
                             self.is_running = True
                             start_dispatcher = True
@@ -5179,6 +5428,7 @@ class EncoderApp:
                 batch_chunk = []
                 if added_count > 0:
                     total_added += added_count
+                    self.save_queue_state()
                     self.ui_queue.put(("refresh_queue", None))
                     if start_dispatcher:
                         self.set_app_state("encoding")
@@ -5190,8 +5440,12 @@ class EncoderApp:
                     if not clean: continue
                     if os.path.isdir(clean):
                         clean_abs = os.path.abspath(clean)
-                        folder_name = os.path.basename(os.path.normpath(clean_abs)) or "Encoded_Output"
-                        folder_info = {"source_root": clean_abs, "resolved": {}}
+                        if clean_abs in resume_map:
+                            folder_name = resume_map[clean_abs]
+                            folder_info = {"source_root": clean_abs, "resolved": {dest_dir: folder_name}, "resumed": True}
+                        else:
+                            folder_name = os.path.basename(os.path.normpath(clean_abs)) or "Encoded_Output"
+                            folder_info = {"source_root": clean_abs, "resolved": {}}
                         for root_dir, _, filenames in os.walk(clean_abs):
                             sub_rel = os.path.relpath(root_dir, clean_abs)
                             sub_rel_clean = "" if sub_rel == "." else sub_rel
@@ -5231,6 +5485,7 @@ class EncoderApp:
                 self.update_settings_header_label()
                 self.update_settings_summary()
                 self._update_queue_stats()
+                self.save_queue_state()
                 return
         self.cancel_single_item(item_id)
 
@@ -5269,6 +5524,7 @@ class EncoderApp:
             items_snapshot = list(self.queue_items)
         self.canvas_queue.set_items(items_snapshot)
         self._update_queue_stats()
+        self.save_queue_state()
 
     def clear_queued_items(self):
         with self.queue_lock:
@@ -5284,6 +5540,7 @@ class EncoderApp:
         self.update_settings_header_label()
         self.update_settings_summary()
         self._update_queue_stats()
+        self.save_queue_state()
         if removed_count > 0: self.append_log(f"[INFO] Cleared {removed_count} queued item(s).\n")
 
     def _update_queue_stats(self):
@@ -5671,6 +5928,7 @@ class EncoderApp:
         self.update_settings_header_label()
         self.update_settings_summary()
         self._update_queue_stats()
+        self.save_queue_state()
         if removed_count > 0:
             self.append_log(f"[INFO] Removed {removed_count} selected item(s) from queue.\n")
 
@@ -5688,6 +5946,7 @@ class EncoderApp:
             items_snapshot = list(self.queue_items)
         self.canvas_queue.set_items(items_snapshot)
         self.canvas_queue.set_selected_ids(self.selected_queue_ids)
+        self.save_queue_state()
 
     def _update_item_hold_clock(self, item_id):
         st = self.item_hold_state.setdefault(item_id, {"held_total": 0.0, "held_since": None})
@@ -6194,7 +6453,7 @@ class EncoderApp:
         base_name = current_item["filename"]
         display_name = current_item.get("display_name", base_name)
         rel_dir = current_item.get("rel_dir", "")
-        proc, lock_file, out_file = None, None, None
+        proc, lock_file, out_file, temp_out_file = None, None, None, None
         exit_code = 1
         is_cancelled = False
 
@@ -6350,9 +6609,11 @@ class EncoderApp:
                 sub_rel = current_item.get("sub_rel", "")
                 rel_dir = safe_top if not sub_rel else os.path.join(safe_top, sub_rel)
             settings_tag = get_settings_filename_tag(settings) if settings.get("tag_settings", False) else ""
-            out_file, lock_file = generate_safe_output_path(f, dest_dir, rel_dir=rel_dir, ext=out_ext, suffix=settings_tag)
+            should_replace = bool(current_item.get("replace_corrupt") or (folder_info and folder_info.get("resumed")))
+            out_file, lock_file = generate_safe_output_path(f, dest_dir, rel_dir=rel_dir, ext=out_ext, suffix=settings_tag, replace_corrupt=should_replace)
+            temp_out_file = os.path.join(os.path.dirname(out_file), f".partial_{os.path.basename(out_file)}")
             with self.process_lock:
-                self.active_output_files[item_id] = (out_file, lock_file)
+                self.active_output_files[item_id] = (temp_out_file, lock_file)
 
             audio_args = self.get_audio_args(f, probe_data=probe, keep_pcm=keep_lpcm)
             if not audio_args:
@@ -6518,19 +6779,24 @@ class EncoderApp:
 
                 eff_w = target_w or disp_w
                 eff_h = target_h or disp_h
-                c_sigma = 3.6 if max(eff_w, eff_h) >= 7000 else (2.6 if max(eff_w, eff_h) >= 3000 else 1.8)
+                l_sigma = 0.85 if max(eff_w, eff_h) >= 7000 else (0.68 if max(eff_w, eff_h) >= 3000 else 0.55)
+                c_sigma = 4.8 if max(eff_w, eff_h) >= 7000 else (3.5 if max(eff_w, eff_h) >= 3000 else 2.4)
                 if denoise_mode == "light":
+                    l_sigma = round(l_sigma * 0.75, 2)
                     c_sigma = round(c_sigma * 0.70, 2)
-                ata_a = "0.005" if denoise_mode == "light" else "0.008"
-                ata_b = "0.010" if denoise_mode == "light" else "0.016"
+                ata_a, ata_b = ("0.016", "0.034") if denoise_mode == "light" else ("0.024", "0.052")
+                ata_ca, ata_cb = ("0.018", "0.040") if denoise_mode == "light" else ("0.028", "0.060")
+                mask_expr = "(0.29*maxval-val)*6.5" if denoise_mode == "light" else "(0.33*maxval-val)*8.0"
                 denoise_subgraph = (
-                    f"format={yuv_fmt},atadenoise=0a={ata_a}:0b={ata_b}:s=5:p=1:a=p,"
+                    f"format={yuv_fmt},"
                     f"split=3[dn_orig][dn_in][dn_mask];"
-                    f"[dn_in]gblur=sigma={c_sigma}:steps=2:planes=6[dn_filt];"
-                    f"[dn_mask]lutyuv=y='(0.30*maxval-val)*12.5',extractplanes=y,split=2[dn_my][dn_mc_in];"
-                    f"[dn_mc_in]scale={c_scale}:flags=bilinear[dn_mc];"
+                    f"[dn_in]gblur=sigma={l_sigma}:steps=1:planes=1,"
+                    f"gblur=sigma={c_sigma}:steps=1:planes=6,"
+                    f"atadenoise=0a={ata_a}:0b={ata_b}:1a={ata_ca}:1b={ata_cb}:2a={ata_ca}:2b={ata_cb}:s=5:p=7:a=p[dn_filt];"
+                    f"[dn_mask]setparams=range=full,lutyuv=y='{mask_expr}',extractplanes=y,split=2[dn_my][dn_mc_in];"
+                    f"[dn_mc_in]scale={c_scale}:flags=fast_bilinear[dn_mc];"
                     f"[dn_my][dn_mc]mergeplanes=mapping=0x001010:format={yuv_fmt}[dn_m];"
-                    f"[dn_orig][dn_filt][dn_m]maskedmerge=planes=6"
+                    f"[dn_orig][dn_filt][dn_m]maskedmerge=planes=7"
                 )
                 vf_filters.append(denoise_subgraph)
 
@@ -6580,8 +6846,8 @@ class EncoderApp:
             enc_name = "AppleMediaEngine" if is_videotoolbox else "CPU (Software)"
             audio_tag_str = "24-Bit LPCM" if keep_lpcm else ("AAC" if audio_args else "None")
             scale_log = f" • Scale: {target_w}x{target_h} [Lanczos]" if (target_w and target_h and target_w != disp_w) else ""
-            dn_desc = "Light (s=5, 0a=0.005)" if denoise_mode == "light" else "Full (s=5, 0a=0.008)"
-            denoise_log = f" • Denoise: {dn_desc} Organic Luma Grain + Luma-Gated Shadow Chroma Diffusion (C-Log Optimized)" if is_adaptive_denoise and not has_alpha else ""
+            dn_desc = "Light (Fast)" if denoise_mode == "light" else "Full (Fast)"
+            denoise_log = f" • Denoise: {dn_desc} Motion-Safe Shadow Stabilization + Chroma Diffusion (C-Log Optimized)" if is_adaptive_denoise and not has_alpha else ""
             self.append_log(
                 f"\n▶ [START] {display_name}\n"
                 f"  • Settings: {codec_choice} ({enc_name}) • {chroma_choice} • {cap_info}{scale_log}{denoise_log} • Audio: {audio_tag_str}\n"
@@ -6692,7 +6958,7 @@ class EncoderApp:
             else:
                 cmd.extend(["-movflags", "+faststart+use_metadata_tags"])
 
-            cmd.append(out_file)
+            cmd.append(temp_out_file)
 
             exit_code = 1
             stderr_dump = ""
@@ -6902,8 +7168,8 @@ class EncoderApp:
                 if exit_code != 0 and not is_cancelled and attempt < 3:
                     if any(k in stderr_dump.lower() for k in ("error writing trailer", "shifting data", "udta", "unable to re-open")):
                         self.append_log(f"⚠️ [RETRY {attempt + 1}/3] Container trailer finalization failed for {display_name}. Retrying with direct container writing...\n")
-                        if out_file and os.path.exists(out_file):
-                            try: os.remove(out_file)
+                        if temp_out_file and os.path.exists(temp_out_file):
+                            try: os.remove(temp_out_file)
                             except OSError: pass
                         for idx, arg in enumerate(cmd):
                             if arg == "-movflags":
@@ -6913,8 +7179,8 @@ class EncoderApp:
                         continue
                     if "-timecode" in cmd and any(k in stderr_dump.lower() for k in ("timecode", "drop frame", "tmcd")):
                         self.append_log(f"⚠️ [WARNING] Timecode rejected for {display_name}. Retrying without timecode...\n")
-                        if out_file and os.path.exists(out_file):
-                            try: os.remove(out_file)
+                        if temp_out_file and os.path.exists(temp_out_file):
+                            try: os.remove(temp_out_file)
                             except OSError: pass
                         tc_idx = cmd.index("-timecode")
                         cmd.pop(tc_idx)
@@ -6922,8 +7188,8 @@ class EncoderApp:
                         continue
                     if subtitle_args and any(arg in cmd for arg in subtitle_args) and any(k in stderr_dump.lower() for k in ("subtitle", "mov_text", "packet too large", "failed to convert", "subrip")):
                         self.append_log(f"⚠️ [WARNING] Subtitle muxing failed for {display_name}. Retrying without subtitles...\n")
-                        if out_file and os.path.exists(out_file):
-                            try: os.remove(out_file)
+                        if temp_out_file and os.path.exists(temp_out_file):
+                            try: os.remove(temp_out_file)
                             except OSError: pass
                         sub_len = len(subtitle_args)
                         for idx in range(len(cmd) - sub_len + 1):
@@ -6936,8 +7202,8 @@ class EncoderApp:
                         hw_idx = cmd.index("-hwaccel")
                         del cmd[hw_idx:hw_idx + 2]
                         self.append_log(f"⚠️ Retrying '{display_name}' using software decoding...\n")
-                        if out_file and os.path.exists(out_file):
-                            try: os.remove(out_file)
+                        if temp_out_file and os.path.exists(temp_out_file):
+                            try: os.remove(temp_out_file)
                             except OSError: pass
                         continue
                     is_hw_err = any(k in stderr_dump for k in ("-17691", "-12903", "-12905", "-12912", "-12915", "-542398533", "Error while opening encoder", "Error submitting video frame")) or exit_code in (187, -22, -9, -signal.SIGKILL)
@@ -6947,8 +7213,8 @@ class EncoderApp:
                         base_backoff = 4.0 if is_8k else 2.5
                         backoff = base_backoff * (attempt + 1) + jitter
                         self.append_log(f"⚠️ [RETRY {attempt + 1}/3] Hardware media engine busy for {display_name}. Waiting {backoff:.1f}s to recover...\n")
-                        if out_file and os.path.exists(out_file):
-                            try: os.remove(out_file)
+                        if temp_out_file and os.path.exists(temp_out_file):
+                            try: os.remove(temp_out_file)
                             except OSError: pass
                         with self.process_lock:
                             self.retrying_ids.add(item_id)
@@ -6964,6 +7230,8 @@ class EncoderApp:
 
             if exit_code == 0:
                 self._dispatcher_crash_count = 0
+                if temp_out_file and os.path.exists(temp_out_file):
+                    os.replace(temp_out_file, out_file)
                 stats_str, orig_sz, new_sz = "", 0, 0
                 try:
                     orig_sz = os.path.getsize(f) if (f and os.path.exists(f)) else 0
@@ -6994,6 +7262,8 @@ class EncoderApp:
                     current_item["pending_done_stats"] = stats_str
                 with self.process_lock:
                     self.active_output_files.pop(item_id, None)
+                if not getattr(self, "_closing_app", False):
+                    self.save_queue_state()
             else:
                 if is_cancelled:
                     self.append_log(f"⚠ [CANCELLED] Skipped: {display_name}\n")
@@ -7010,6 +7280,8 @@ class EncoderApp:
                     self.append_log(f"✖ [ERROR] Failed: {display_name} (Code {exit_code}){err_hint}\n")
                     with self.queue_lock: current_item["status"] = "failed"
                     self.update_item_status_ui(item_id, "failed", refresh_stats=True)
+                if not getattr(self, "_closing_app", False):
+                    self.save_queue_state()
         except Exception:
             self.append_log(f"✖ [CRASH] {traceback.format_exc()}\n")
             with self.queue_lock: current_item["status"] = "failed"
@@ -7032,9 +7304,9 @@ class EncoderApp:
                     try:
                         active_proc.wait(timeout=0.5)
                     except Exception: pass
-            if not is_completed and out_file and os.path.exists(out_file):
+            if not is_completed and temp_out_file and os.path.exists(temp_out_file):
                 try:
-                    os.remove(out_file)
+                    os.remove(temp_out_file)
                 except OSError:
                     pass
             release_output_path(lock_file)
