@@ -6092,7 +6092,106 @@ class EncoderApp:
             if fps_cand and 1.0 <= fps_cand <= 300.0: fps = fps_cand
         return duration, fps, width, height, timecode, pix_fmt
 
-    def get_audio_args(self, filepath, probe_data=None, keep_pcm=False):
+    def analyze_pcm_audio_tracks(self, filepath, probe_data=None, duration=0.0):
+        import array as _array
+        try:
+            data = probe_data if (probe_data and probe_data.get("streams")) else self.probe_media_file(filepath)
+            a_streams = [s for s in data.get("streams", []) if s.get("codec_type") == "audio"]
+            if len(a_streams) != 4:
+                return False, set(), ""
+            for s in a_streams:
+                cname = str(s.get("codec_name", "")).lower()
+                try:
+                    ch = int(s.get("channels") or 1)
+                except (ValueError, TypeError):
+                    ch = 1
+                if ch != 1 or ("pcm" not in cname and cname not in ("wav", "aiff")):
+                    return False, set(), ""
+
+            idx0, idx1, idx2, idx3 = [s.get("index") for s in a_streams]
+            if any(x is None for x in (idx0, idx1, idx2, idx3)):
+                return False, set(), ""
+
+            if duration and duration > 8.0:
+                sample_windows = [(0.0, 3.0), (round(duration * 0.45, 2), 3.0)]
+            else:
+                sample_windows = [(0.0, 6.0)]
+
+            max_amp = [0, 0, 0, 0]
+            sum_abs = [0, 0, 0, 0]
+            sum_diff_02 = 0
+            sum_diff_13 = 0
+            total_frames = 0
+
+            for start_t, win_dur in sample_windows:
+                cmd = [FFMPEG_BIN, "-v", "error"]
+                if start_t > 0.0:
+                    cmd.extend(["-ss", str(start_t)])
+                cmd.extend([
+                    "-t", str(win_dur),
+                    "-i", filepath,
+                    "-filter_complex", f"[0:{idx0}][0:{idx1}][0:{idx2}][0:{idx3}]amerge=inputs=4[aout]",
+                    "-map", "[aout]",
+                    "-f", "s16le", "-acodec", "pcm_s16le", "pipe:1"
+                ])
+                res = subprocess.run(cmd, capture_output=True, timeout=10)
+                if res.returncode != 0 or not res.stdout:
+                    continue
+                raw = res.stdout
+                usable_len = (len(raw) // 8) * 8
+                if usable_len <= 0:
+                    continue
+                samples = _array.array("h")
+                samples.frombytes(raw[:usable_len])
+                if sys.byteorder == "big":
+                    samples.byteswap()
+                c0 = samples[0::4]
+                c1 = samples[1::4]
+                c2 = samples[2::4]
+                c3 = samples[3::4]
+                n_frames = len(c0)
+                if n_frames == 0:
+                    continue
+                total_frames += n_frames
+
+                for ch_i, ch_arr in enumerate((c0, c1, c2, c3)):
+                    ch_max = max(abs(min(ch_arr)), abs(max(ch_arr)))
+                    if ch_max > max_amp[ch_i]:
+                        max_amp[ch_i] = ch_max
+                    sum_abs[ch_i] += sum(abs(v) for v in ch_arr)
+
+                sum_diff_02 += sum(abs(a - b) for a, b in zip(c0, c2))
+                sum_diff_13 += sum(abs(a - b) for a, b in zip(c1, c3))
+
+            if total_frames == 0:
+                return False, set(), ""
+
+            pair12_silent = (max_amp[0] <= 2 and max_amp[1] <= 2)
+            pair34_silent = (max_amp[2] <= 2 and max_amp[3] <= 2)
+
+            if pair34_silent and not pair12_silent:
+                return True, {idx2, idx3}, "CH3/4 digitally silent"
+            if pair12_silent and not pair34_silent:
+                return True, {idx0, idx1}, "CH1/2 digitally silent"
+            if pair12_silent and pair34_silent:
+                return True, {idx2, idx3}, "all 4 channels silent"
+
+            mean_abs_0 = sum_abs[0] / total_frames
+            mean_abs_1 = sum_abs[1] / total_frames
+            mean_diff_02 = sum_diff_02 / total_frames
+            mean_diff_13 = sum_diff_13 / total_frames
+
+            same_02 = (mean_diff_02 <= 2.0) or (mean_abs_0 > 20.0 and (mean_diff_02 / mean_abs_0) < 0.005)
+            same_13 = (mean_diff_13 <= 2.0) or (mean_abs_1 > 20.0 and (mean_diff_13 / mean_abs_1) < 0.005)
+
+            if same_02 and same_13:
+                return True, {idx2, idx3}, "CH3/4 duplicate of CH1/2"
+
+            return False, set(), "distinct 4-ch audio"
+        except Exception:
+            return False, set(), ""
+
+    def get_audio_args(self, filepath, probe_data=None, keep_pcm=False, drop_indices=None):
         data = probe_data if (probe_data and probe_data.get("streams")) else self.probe_media_file(filepath)
         streams = [s for s in data.get("streams", []) if s.get("codec_type") == "audio"]
         args = []
@@ -6100,6 +6199,8 @@ class EncoderApp:
         for s in streams:
             s_idx = s.get("index")
             if s_idx is None:
+                continue
+            if drop_indices and s_idx in drop_indices:
                 continue
             codec = s.get("codec_name", "").lower()
             try: ch = int(s.get("channels") or 2)
@@ -6574,6 +6675,7 @@ class EncoderApp:
             has_pcm_audio = any("pcm" in str(s.get("codec_name", "")).lower() or str(s.get("codec_name", "")).lower() in ("wav", "aiff") for s in probe.get("streams", []) if s.get("codec_type") == "audio")
             preset_name = settings.get("preset", "")
             container_mode = str(settings.get("container", "Auto")).strip().upper()
+            drop_audio_indices = set()
 
             if container_mode == "MP4":
                 if has_alpha and not is_h264:
@@ -6588,15 +6690,23 @@ class EncoderApp:
                 keep_lpcm = has_pcm_audio
             else:
                 # Auto (Smart) mode:
-                # Retains MOV with uncompressed 24-bit PCM for Log/Master workflows (preserving Canon R5 4-ch PCM),
-                # but uses universal MP4 (AAC) when no PCM is present or for standard distribution presets.
+                # Retains MOV with uncompressed 24-bit PCM for Log/Master workflows when 4-ch audio is distinct,
+                # or drops duplicate/silent backup channels and compresses to AAC (.mp4) on B-roll.
                 is_master_wf = (preset_name == "Log Footage") or ("4:2:2" in chroma_choice)
                 if has_alpha and not is_h264:
                     out_ext = ".mov"
                     keep_lpcm = False
                 elif has_pcm_audio and is_master_wf:
-                    out_ext = ".mov"
-                    keep_lpcm = True
+                    is_dup, drop_audio_indices, dedup_reason = self.analyze_pcm_audio_tracks(f, probe_data=probe, duration=duration)
+                    if is_dup:
+                        out_ext = ".mp4"
+                        keep_lpcm = False
+                        self.append_log(f"ℹ️ [AUDIO-DEDUP] {dedup_reason} in '{display_name}'. Dropping duplicate/silent tracks and compressing to AAC (.mp4).\n")
+                    else:
+                        out_ext = ".mov"
+                        keep_lpcm = True
+                        if dedup_reason:
+                            self.append_log(f"ℹ️ [AUDIO-MASTER] Distinct 4-ch audio detected in '{display_name}'. Preserving 24-bit LPCM (.mov).\n")
                 else:
                     out_ext = ".mp4"
                     keep_lpcm = False
@@ -6616,7 +6726,7 @@ class EncoderApp:
             with self.process_lock:
                 self.active_output_files[item_id] = (temp_out_file, lock_file)
 
-            audio_args = self.get_audio_args(f, probe_data=probe, keep_pcm=keep_lpcm)
+            audio_args = self.get_audio_args(f, probe_data=probe, keep_pcm=keep_lpcm, drop_indices=drop_audio_indices)
             if not audio_args:
                 audio_args = ["-map", "0:a?", "-c:a", "copy"]
             subtitle_args = self.get_subtitle_args(f, probe_data=probe)
