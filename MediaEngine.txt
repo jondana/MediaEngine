@@ -1798,11 +1798,6 @@ class QuartzQueueCanvas(tk.Canvas):
         )
         self._font_title = tkfont.Font(family="SF Pro Text", size=11)
         self._font_sub = tkfont.Font(family="SF Pro Text", size=10)
-        self._tooltip_win = None
-        self._tooltip_lbl_title = None
-        self._tooltip_lbl_sub = None
-        self._tooltip_row_id = None
-        self._tooltip_after_id = None
         self.hovered_del_id = None
         self.hovered_info_id = None
         self.hovered_reveal_id = None
@@ -1811,7 +1806,6 @@ class QuartzQueueCanvas(tk.Canvas):
         self.bind("<Leave>", self._on_mouse_leave)
         self.bind("<Button-1>", self._on_click)
         self.bind("<Double-Button-1>", self._on_double_click)
-        self.bind("<Destroy>", lambda e: self._destroy_tooltip() if e.widget is self else None)
 
     def _get_bg_rgb(self):
         try:
@@ -1899,15 +1893,12 @@ class QuartzQueueCanvas(tk.Canvas):
             self._update_visible_rows()
 
     def yview(self, *args):
-        if args:
-            self._cancel_tooltip()
         res = super().yview(*args)
         if args and not self._updating_viewport:
             self._update_visible_rows()
         return res
 
     def yview_moveto(self, fraction):
-        self._cancel_tooltip()
         res = super().yview_moveto(fraction)
         if not self._updating_viewport:
             self._update_visible_rows()
@@ -1929,7 +1920,6 @@ class QuartzQueueCanvas(tk.Canvas):
         self.scroller.handle_wheel_input(delta_input)
 
     def set_items(self, items):
-        self._cancel_tooltip()
         self.items = list(items)
         self.item_map = {x["id"]: x for x in self.items}
         self.redraw_all()
@@ -2271,90 +2261,6 @@ class QuartzQueueCanvas(tk.Canvas):
                 hi = mid - 1
         return text[:max(1, lo)] + ell
 
-    def _cancel_tooltip(self):
-        if getattr(self, "_tooltip_after_id", None):
-            try:
-                self.after_cancel(self._tooltip_after_id)
-            except Exception:
-                pass
-            self._tooltip_after_id = None
-        self._tooltip_row_id = None
-        if getattr(self, "_tooltip_win", None):
-            try:
-                self._tooltip_win.withdraw()
-            except Exception:
-                pass
-
-    def _destroy_tooltip(self):
-        self._cancel_tooltip()
-        if getattr(self, "_tooltip_win", None):
-            try:
-                self._tooltip_win.destroy()
-            except Exception:
-                pass
-            self._tooltip_win = None
-
-    def _show_tooltip(self, item_id):
-        self._tooltip_after_id = None
-        if not self.winfo_exists() or not self.winfo_ismapped() or self._tooltip_row_id != item_id:
-            return
-        item = self.item_map.get(item_id)
-        if not item:
-            return
-        try:
-            rx, ry = self.winfo_pointerxy()
-            wx, wy = self.winfo_rootx(), self.winfo_rooty()
-            if not (wx <= rx <= wx + self.winfo_width() and wy <= ry <= wy + self.winfo_height()):
-                return
-        except Exception:
-            return
-
-        full_name = item.get("display_name") or item.get("filename") or ""
-        if not full_name:
-            return
-
-        if not self._tooltip_win or not self._tooltip_win.winfo_exists():
-            win = tk.Toplevel(self)
-            win.withdraw()
-            win.overrideredirect(True)
-            try:
-                win.attributes("-topmost", True)
-            except Exception:
-                pass
-            win.configure(bg="#2e2e2e")
-            frame = tk.Frame(win, bg="#181818", padx=9, pady=6)
-            frame.pack(padx=1, pady=1)
-            lbl_t = tk.Label(frame, text="", bg="#181818", fg=TEXT_PRIMARY, font=("SF Pro Text", 11, "bold"), justify="left", anchor="w", wraplength=540)
-            lbl_t.pack(anchor="w")
-            lbl_s = tk.Label(frame, text="", bg="#181818", fg=DONE_GREEN, font=("SF Pro Text", 10), justify="left", anchor="w", wraplength=540)
-            for w in (win, frame, lbl_t, lbl_s):
-                w.bind("<Enter>", lambda e: self._cancel_tooltip())
-                w.bind("<Button-1>", lambda e: self._cancel_tooltip())
-            self._tooltip_win = win
-            self._tooltip_lbl_title = lbl_t
-            self._tooltip_lbl_sub = lbl_s
-
-        self._tooltip_lbl_title.configure(text=full_name)
-        done_stats = item.get("done_stats", "").lstrip("• ").strip() if item.get("status") == "completed" else ""
-        if done_stats:
-            self._tooltip_lbl_sub.configure(text=done_stats, fg=DONE_GREEN)
-            if not self._tooltip_lbl_sub.winfo_ismapped():
-                self._tooltip_lbl_sub.pack(anchor="w", pady=(2, 0))
-        else:
-            if self._tooltip_lbl_sub.winfo_ismapped():
-                self._tooltip_lbl_sub.pack_forget()
-
-        win = self._tooltip_win
-        win.update_idletasks()
-        tw, th = win.winfo_reqwidth(), win.winfo_reqheight()
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        px = min(max(8, rx + 12), max(8, sw - tw - 8))
-        py = ry + 18
-        if py + th > sh - 8:
-            py = max(8, ry - th - 10)
-        win.geometry(f"+{px}+{py}")
-        win.deiconify()
-
     def _on_mouse_move(self, event):
         cx, cy = self.canvasx(event.x), self.canvasy(event.y)
         action, target_id = self._get_target_action(cx, cy)
@@ -2368,13 +2274,6 @@ class QuartzQueueCanvas(tk.Canvas):
                 self._redraw_row(old_rev)
             if rev_target:
                 self._redraw_row(rev_target)
-
-        hover_row_id = target_id if action == "select" else None
-        if hover_row_id != self._tooltip_row_id:
-            self._cancel_tooltip()
-            self._tooltip_row_id = hover_row_id
-            if hover_row_id is not None:
-                self._tooltip_after_id = self.after(350, lambda rid=hover_row_id: self._show_tooltip(rid))
 
         if action == "delete" and target_id != self.hovered_del_id:
             if self.hovered_del_id:
@@ -2401,7 +2300,6 @@ class QuartzQueueCanvas(tk.Canvas):
             self.hovered_info_id = None
 
     def _on_mouse_leave(self, event):
-        self._cancel_tooltip()
         self.configure(cursor="")
         if self.hovered_del_id:
             self.itemconfig(f"del_btn_{self.hovered_del_id}", fill="#1c1c1c", outline="")
@@ -2417,7 +2315,6 @@ class QuartzQueueCanvas(tk.Canvas):
             self._redraw_row(old_rev)
 
     def _on_click(self, event):
-        self._cancel_tooltip()
         self.focus_set()
         cx, cy = self.canvasx(event.x), self.canvasy(event.y)
         action, target_id = self._get_target_action(cx, cy)
@@ -2850,8 +2747,9 @@ class EncoderApp:
                     os.remove(THEME_FILE)
             except Exception: pass
         self.draw_theme_dot()
-        if hasattr(self, "batch_progress_bar"):
-            self.batch_progress_bar.configure(progress_color=ULTRA_TEXT)
+        self._last_batch_colors = None
+        if hasattr(self, "lbl_batch_status"):
+            self._update_queue_stats()
         if hasattr(self, "quality_slider"):
             self.quality_slider.configure(progress_color=ULTRA_BG, button_color=ULTRA_TEXT, button_hover_color=ULTRA_TEXT_HOVER)
         self.update_concurrency_buttons_ui()
@@ -4883,6 +4781,8 @@ class EncoderApp:
             self.status_badge.configure(text="● IDLE", text_color=DONE_GREEN, fg_color=DONE_BG)
             self.btn_cancel.configure(state="disabled")
             self.update_action_button_ui()
+        if hasattr(self, "lbl_batch_status"):
+            self._update_queue_stats()
 
     def append_log(self, text):
         now_ts = time.strftime("[%H:%M:%S] ")
@@ -5572,16 +5472,39 @@ class EncoderApp:
                 self.batch_anim_job = None
             self.lbl_batch_pct.configure(text="0%")
             self.batch_progress_bar.set(0)
+            cols = (TEXT_MUTED, TEXT_MUTED, ULTRA_TEXT)
+            if getattr(self, "_last_batch_colors", None) != cols:
+                self.lbl_batch_status.configure(text_color=cols[0])
+                self.lbl_batch_pct.configure(text_color=cols[1])
+                self.batch_progress_bar.configure(progress_color=cols[2])
+                self._last_batch_colors = cols
             self._update_select_all_btn()
         else:
+            is_batch_done = (completed == total and running == 0 and on_hold == 0 and queued == 0)
             target_p = min(100.0, max(0.0, (total_progress / total) * 100.0)) if total > 0 else 0.0
             self.batch_target_pct = target_p
             self.batch_cur_pct = target_p
+            if is_batch_done:
+                new_p = 1.0
+                new_pct_str = "100%"
+                cols = (DONE_GREEN, DONE_GREEN, DONE_GREEN)
+            else:
+                new_p = max(0.0, min(0.99, target_p / 100.0))
+                new_pct_str = f"{min(99, int(round(target_p)))}%"
+                if self.is_paused:
+                    cols = (HOLD_TEXT, HOLD_TEXT, HOLD_TEXT)
+                elif running > 0 or on_hold > 0:
+                    cols = (ULTRA_TEXT, ULTRA_TEXT, ULTRA_TEXT)
+                else:
+                    cols = (TEXT_PRIMARY, TEXT_MUTED, ULTRA_TEXT)
             if hasattr(self, "batch_progress_bar"):
-                new_p = max(0.0, min(1.0, target_p / 100.0))
                 if abs(self.batch_progress_bar.get() - new_p) > 0.001:
                     self.batch_progress_bar.set(new_p)
-            new_pct_str = f"{int(round(target_p))}%"
+                if getattr(self, "_last_batch_colors", None) != cols:
+                    self.lbl_batch_status.configure(text_color=cols[0])
+                    self.lbl_batch_pct.configure(text_color=cols[1])
+                    self.batch_progress_bar.configure(progress_color=cols[2])
+                    self._last_batch_colors = cols
             if hasattr(self, "lbl_batch_pct") and self.lbl_batch_pct.cget("text") != new_pct_str:
                 self.lbl_batch_pct.configure(text=new_pct_str)
             txt = f"Batch: {completed}/{total} Completed"
