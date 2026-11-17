@@ -1782,6 +1782,7 @@ class QuartzQueueCanvas(tk.Canvas):
         self.items = []
         self.item_map = {}
         self.rendered_rows = {}  # maps idx -> item_id
+        self.rendered_status = {}  # maps item_id -> last rendered status
         self._external_yscrollcommand = None
         self._updating_viewport = False
         self._grad_top_photo = None
@@ -1950,7 +1951,7 @@ class QuartzQueueCanvas(tk.Canvas):
     def update_item_status(self, item_id, status, ptext=None, done_stats=None):
         item = self.item_map.get(item_id)
         if not item: return
-        old_status = item.get("status")
+        old_status = self.rendered_status.get(item_id)
         item["status"] = status
         if ptext is not None: item["progress_text"] = ptext
         if done_stats is not None: item["done_stats"] = done_stats
@@ -1994,6 +1995,7 @@ class QuartzQueueCanvas(tk.Canvas):
             if total_items == 0:
                 self.delete("all")
                 self.rendered_rows.clear()
+                self.rendered_status.clear()
                 self._clear_gradients()
                 h = max(100, self.winfo_height())
                 self.create_text(w / 2, h / 2, text="Drop files or folders anywhere to start encode", fill=TEXT_MUTED, font=("SF Pro Text", 11), tags="placeholder")
@@ -2014,16 +2016,19 @@ class QuartzQueueCanvas(tk.Canvas):
                 for iid in list(self.rendered_rows.values()):
                     self.delete(f"row_item_{iid}")
                 self.rendered_rows.clear()
+                self.rendered_status.clear()
 
             for idx in list(self.rendered_rows.keys()):
                 if idx not in needed_indices:
                     iid = self.rendered_rows.pop(idx)
                     self.delete(f"row_item_{iid}")
+                    self.rendered_status.pop(iid, None)
                 elif not force and idx < len(self.items):
                     item = self.items[idx]
                     if self.rendered_rows[idx] != item["id"]:
                         old_iid = self.rendered_rows.pop(idx)
                         self.delete(f"row_item_{old_iid}")
+                        self.rendered_status.pop(old_iid, None)
 
             for idx in range(start_idx, end_idx + 1):
                 if idx not in self.rendered_rows and idx < len(self.items):
@@ -2055,6 +2060,7 @@ class QuartzQueueCanvas(tk.Canvas):
         self._draw_rounded_rect(x1, y1, x2, y2, radius=8, fill=row_fill, outline=row_outline, width=row_width, tags=("row", f"row_{iid}", f"row_item_{iid}"))
 
         status = item.get("status", "queued")
+        self.rendered_status[iid] = status
         btn_cy = (y1 + y2) / 2
         b_w, b_h = 95, 22
         b_x2 = x2 - 10
