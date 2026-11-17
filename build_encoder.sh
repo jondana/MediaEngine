@@ -6832,8 +6832,8 @@ class EncoderApp:
                     f"[dn_in]gblur=sigma={l_sigma}:steps=1:planes=1,"
                     f"gblur=sigma={c_sigma}:steps=1:planes=6,"
                     f"atadenoise=0a={ata_a}:0b={ata_b}:1a={ata_ca}:1b={ata_cb}:2a={ata_ca}:2b={ata_cb}:s=5:p=7:a=p[dn_filt];"
-                    f"[dn_mask]setparams=range=full,lutyuv=y='{mask_expr}',extractplanes=y,split=2[dn_my][dn_mc_in];"
-                    f"[dn_mc_in]scale={c_scale}:flags=fast_bilinear[dn_mc];"
+                    f"[dn_mask]setparams=range=full,lutyuv=y='{mask_expr}',extractplanes=y,setsar=1,split=2[dn_my][dn_mc_in];"
+                    f"[dn_mc_in]scale={c_scale}:flags=fast_bilinear,setsar=1[dn_mc];"
                     f"[dn_my][dn_mc]mergeplanes=mapping=0x001010:format={yuv_fmt}[dn_m];"
                     f"[dn_orig][dn_filt][dn_m]maskedmerge=planes=7"
                 )
@@ -7061,7 +7061,7 @@ class EncoderApp:
                                 line_lower = eline.lower()
                                 if any(noise in line_lower for noise in ignored_patterns):
                                     continue
-                                if any(k in line_lower for k in ("error", "warning", "fatal", "failed", "unsupported")):
+                                if any(k in line_lower for k in ("error", "warning", "fatal", "failed", "unsupported", "does not match")):
                                     clean_e = eline.strip()
                                     if clean_e:
                                         chunk.append(f"  [{display_name}] {clean_e}\n")
@@ -7205,7 +7205,7 @@ class EncoderApp:
                 is_cancelled = (self.cancel_requested or item_id in self.cancelled_ids)
 
                 if exit_code != 0 and not is_cancelled and attempt < 3:
-                    if any(k in stderr_dump.lower() for k in ("error writing trailer", "shifting data", "udta", "unable to re-open")):
+                    if any(k in stderr_dump.lower() for k in ("error writing trailer", "shifting data", "unable to re-open")):
                         self.append_log(f"⚠️ [RETRY {attempt + 1}/3] Container trailer finalization failed for {display_name}. Retrying with direct container writing...\n")
                         if temp_out_file and os.path.exists(temp_out_file):
                             try: os.remove(temp_out_file)
