@@ -269,8 +269,68 @@ LAST_OUTPUT_DIR_FILE = os.path.join(USER_PRESETS_DIR, "last_output_dir.txt")
 THEME_FILE = os.path.join(USER_PRESETS_DIR, "theme_color.txt")
 CONCURRENCY_FILE = os.path.join(USER_PRESETS_DIR, "concurrency.txt")
 AUTO_START_FILE = os.path.join(USER_PRESETS_DIR, "auto_start.txt")
+IDLE_ONLY_FILE = os.path.join(USER_PRESETS_DIR, "idle_only.txt")
+IDLE_DELAY_FILE = os.path.join(USER_PRESETS_DIR, "idle_delay.txt")
 TAG_SETTINGS_FILE = os.path.join(USER_PRESETS_DIR, "tag_settings.txt")
 QUEUE_STATE_FILE = os.path.join(USER_PRESETS_DIR, "queue_state.json")
+
+_CG_IDLE_FN = None
+try:
+    import ctypes as _ctypes
+    _cg_lib = _ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    _cg_lib.CGEventSourceSecondsSinceLastEventType.argtypes = [_ctypes.c_uint32, _ctypes.c_uint32]
+    _cg_lib.CGEventSourceSecondsSinceLastEventType.restype = _ctypes.c_double
+    _CG_IDLE_FN = _cg_lib.CGEventSourceSecondsSinceLastEventType
+except Exception:
+    _CG_IDLE_FN = None
+
+def get_system_idle_seconds():
+    if _CG_IDLE_FN is not None:
+        try:
+            val = float(_CG_IDLE_FN(1, 0xFFFFFFFF))
+            if not math.isnan(val) and val >= 0.0:
+                return val
+        except Exception:
+            pass
+    try:
+        res = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True, timeout=1)
+        m = re.search(r'"HIDIdleTime"\s*=\s*(\d+)', res.stdout)
+        if m:
+            return int(m.group(1)) / 1_000_000_000.0
+    except Exception:
+        pass
+    return 9999.0
+
+def get_active_pro_app_busy(cpu_threshold=35.0):
+    try:
+        res = subprocess.run(["ps", "-axo", "%cpu,comm"], capture_output=True, text=True, errors="replace", timeout=1)
+        if res.returncode != 0:
+            return None
+        pro_apps = (
+            ("final cut pro", "FCP"),
+            ("compressor", "Compressor"),
+            ("motion", "Motion"),
+            ("davinci resolve", "Resolve"),
+            ("adobe premiere pro", "Premiere"),
+            ("after effects", "After Effects"),
+        )
+        for line in res.stdout.splitlines()[1:]:
+            parts = line.strip().split(None, 1)
+            if len(parts) < 2:
+                continue
+            try:
+                cpu = float(parts[0])
+            except ValueError:
+                continue
+            if cpu < cpu_threshold:
+                continue
+            cmd_l = parts[1].lower()
+            for key, short_name in pro_apps:
+                if key in cmd_l and "mediaengine" not in cmd_l:
+                    return short_name
+    except Exception:
+        pass
+    return None
 
 SUPPORTED_EXTENSIONS = (
     ".mp4", ".mov", ".mkv", ".m4v", ".avi",
@@ -1272,8 +1332,31 @@ class QuartzActiveJobsCanvas(tk.Canvas):
     def _tween_step(self):
         """Critically damped spring tweening & smooth exit fade/collapse interpolation."""
         self._anim_job = None
+        if not self.winfo_ismapped():
+            removed_any = False
+            for iid in list(self.job_order):
+                job = self.jobs.get(iid)
+                if not job:
+                    continue
+                if job.get("state") in ("holding", "fading", "dead"):
+                    if job.get("is_complete") and not job.get("is_done_ui"):
+                        job["is_done_ui"] = True
+                        if getattr(self, "on_job_done_ui", None):
+                            try: self.on_job_done_ui(iid)
+                            except Exception: pass
+                    self.jobs.pop(iid, None)
+                    self.job_order.remove(iid)
+                    removed_any = True
+                else:
+                    job["cur_pct"] = job.get("target_pct", 0.0)
+                    job["velocity"] = 0.0
+            if removed_any and self.on_layout_needed:
+                try: self.on_layout_needed()
+                except Exception: pass
+            return
+
         now = time.perf_counter()
-        dt = min(0.05, max(0.001, now - self._last_tween_time))
+        dt = min(0.1, max(0.001, now - self._last_tween_time))
         self._last_tween_time = now
 
         still_animating = False
@@ -1316,7 +1399,7 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                 cur = job.get("cur_pct", 0.0)
                 vel = job.get("velocity", 0.0)
 
-                if abs(target - cur) > 0.04 or abs(vel) > 0.1:
+                if abs(target - cur) > 0.12 or abs(vel) > 0.5:
                     omega = 2.0 / 0.22
                     x = omega * dt
                     exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x)
@@ -1325,7 +1408,7 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                     new_vel = (vel - omega * temp) * exp
                     new_cur = target + (change + temp) * exp
 
-                    if abs(target - new_cur) < 0.05 and abs(new_vel) < 0.2:
+                    if abs(target - new_cur) < 0.12 and abs(new_vel) < 0.5:
                         new_cur = target
                         new_vel = 0.0
                     else:
@@ -1392,9 +1475,11 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                 self.jobs.get(iid, {}).get("state") in ("holding", "fading")
                 for iid in self.job_order
             )
-            self._anim_job = self.after(16 if is_exit_anim else 33, self._tween_step)
+            self._anim_job = self.after(16 if is_exit_anim else 66, self._tween_step)
 
     def _update_job_pbar(self, item_id, pct):
+        if not self.winfo_ismapped():
+            return
         job = self.jobs.get(item_id)
         if not job or "bounds" not in job: return
         x1, y1, x2, y2 = job["bounds"]
@@ -1420,6 +1505,7 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             exists = job.get("_pbar_exists")
             if exists is None:
                 exists = bool(self.find_withtag(tag))
+            bar_moved = False
             if not exists:
                 self.create_polygon(
                     pts, fill=p_col, outline=p_col, width=stroke_w,
@@ -1435,23 +1521,27 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                 job["_last_fill_x"] = fill_x
                 job["_last_pbar_col"] = p_col
                 job["_last_pbar_hidden"] = False
+                bar_moved = True
             else:
                 last_fx = job.get("_last_fill_x", -999.0)
                 was_hidden = job.get("_last_pbar_hidden", False)
-                if abs(fill_x - last_fx) >= 1.0 or was_hidden or (is_done and last_fx < x2 - 0.5):
+                if abs(fill_x - last_fx) >= 1.5 or was_hidden or (is_done and last_fx < x2 - 0.5):
                     self.coords(tag, *pts)
                     job["_last_fill_x"] = fill_x
+                    bar_moved = True
                 if job.get("_last_pbar_col") != p_col or was_hidden:
                     self.itemconfigure(tag, fill=p_col, outline=p_col, width=stroke_w, joinstyle=tk.ROUND, state="normal")
                     job["_last_pbar_col"] = p_col
                     job["_last_pbar_hidden"] = False
+                    bar_moved = True
 
-            disp_pct_str = f"{min(99.9, pct):.1f}%" if not is_done else "100%"
-            pct_col = blend_hex(DONE_GREEN if is_done else (HOLD_TEXT if self.is_paused else ULTRA_TEXT), CARD_BG, alpha)
-            if job.get("_last_disp_pct") != disp_pct_str or job.get("_last_pct_col") != pct_col:
-                self.itemconfig(f"pct_{item_id}", text=disp_pct_str, fill=pct_col)
-                job["_last_disp_pct"] = disp_pct_str
-                job["_last_pct_col"] = pct_col
+            if bar_moved or is_done or pct == job.get("target_pct"):
+                disp_pct_str = f"{min(99.9, pct):.1f}%" if not is_done else "100%"
+                pct_col = blend_hex(DONE_GREEN if is_done else (HOLD_TEXT if self.is_paused else ULTRA_TEXT), CARD_BG, alpha)
+                if job.get("_last_disp_pct") != disp_pct_str or job.get("_last_pct_col") != pct_col:
+                    self.itemconfig(f"pct_{item_id}", text=disp_pct_str, fill=pct_col)
+                    job["_last_disp_pct"] = disp_pct_str
+                    job["_last_pct_col"] = pct_col
         except tk.TclError:
             pass
 
@@ -1484,7 +1574,8 @@ class QuartzActiveJobsCanvas(tk.Canvas):
         if not job.get("is_complete") and not job.get("is_done_ui"):
             job["old_metrics"] = f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
             job["done_metrics"] = f"{clean_t}  •  Completed" if clean_t else "Completed"
-        if not job.get("is_done_ui"):
+        is_mapped = self.winfo_ismapped()
+        if is_mapped and not job.get("is_done_ui"):
             metrics_txt = f"{clean_t}  •  Paused" if self.is_paused else f"{clean_t}  •  {clean_s}  •  {clean_f}  •  {eta_str}"
             if job.get("_last_metrics_txt") != metrics_txt:
                 try:
@@ -1493,7 +1584,10 @@ class QuartzActiveJobsCanvas(tk.Canvas):
                         job["_last_metrics_txt"] = metrics_txt
                 except tk.TclError:
                     pass
-        if abs(target_p - job.get("cur_pct", 0.0)) >= 0.08 or self._anim_job is not None:
+        if not is_mapped:
+            job["cur_pct"] = target_p
+            job["velocity"] = 0.0
+        elif abs(target_p - job.get("cur_pct", 0.0)) >= 0.25 or self._anim_job is not None:
             self._start_tween()
         else:
             job["cur_pct"] = target_p
@@ -1512,6 +1606,15 @@ class QuartzActiveJobsCanvas(tk.Canvas):
             return
 
         if job.get("state") in ("holding", "fading", "dead"):
+            return
+
+        if not self.winfo_ismapped():
+            self.jobs.pop(item_id, None)
+            if item_id in self.job_order:
+                self.job_order.remove(item_id)
+            if completed and getattr(self, "on_job_done_ui", None):
+                try: self.on_job_done_ui(item_id)
+                except Exception: pass
             return
 
         now = time.perf_counter()
@@ -1652,11 +1755,9 @@ class QuartzActiveJobsCanvas(tk.Canvas):
 
             rad = max(1.0, min(8.0, card_h / 2.0))
 
-            # 1. Drop shadows
+            # 1. Drop shadow
             if alpha > 0.08 and card_h > 8:
-                self._draw_rounded_rect(x1 - 1, y1 + 1, x2 + 1, y2 + 3, radius=rad, fill=sh1_col, outline="", tags=("shadow", f"shadow_{iid}"))
                 self._draw_rounded_rect(x1, y1 + 1, x2, y2 + 2, radius=rad, fill=sh2_col, outline="", tags=("shadow", f"shadow_{iid}"))
-                self._draw_rounded_rect(x1, y1 + 1, x2, y2 + 1, radius=rad, fill=sh3_col, outline="", tags=("shadow", f"shadow_{iid}"))
 
             # 2. Card base background
             self._draw_rounded_rect(x1, y1, x2, y2, radius=rad, fill=card_bg, outline="", width=0, tags=("card", f"card_{iid}"))
@@ -2435,6 +2536,8 @@ class EncoderApp:
         self.current_encoder = "AppleMediaEngine"
         self.concurrency_mode = self.load_saved_concurrency()
         self.auto_start = self.load_saved_auto_start()
+        self.idle_only = self.load_saved_idle_only()
+        self.idle_delay = self.load_saved_idle_delay()
         self.tag_settings = self.load_saved_tag_settings()
         self.selected_queue_ids = set()
         self._selection_pivot_id = None
@@ -2468,9 +2571,18 @@ class EncoderApp:
         self._last_launch_time = 0.0
         self.last_pct_map = {}
         self.last_progress_map = {}
+        self.item_live_metrics = {}
+        self._batch_speed_ema = None
+        self._last_batch_eta_t = 0.0
+        self._bg_probe_running = False
         self.item_counter = 0
 
         self.is_paused = False
+        self.is_idle_paused = False
+        self._idle_busy_app = None
+        self._idle_wait_rem = 0
+        self._last_nle_check = 0.0
+        self._cached_nle_busy = None
         self.is_running = False
         self.dispatcher_alive = False
         self.cancel_requested = False
@@ -2507,7 +2619,7 @@ class EncoderApp:
         self.root.bind_all("<Control-a>", self._on_select_all_key, add="+")
 
         self._closing_app = False
-        self.load_queue_state()
+        threading.Thread(target=self._idle_monitor_loop, daemon=True).start()
         self.root.after(100, self.preflight_check)
         self.root.after(30, self._process_ui_queue)
 
@@ -2674,7 +2786,7 @@ class EncoderApp:
                         self.update_item_status_ui(rid, "suspended", f"{pct_val}%", refresh_stats=True)
 
             # 2. Seamlessly resume suspended jobs if budget allows
-            if self.suspended_ids and not self.is_paused:
+            if self.suspended_ids and not self.is_paused and not self.is_idle_paused:
                 for wid in sorted(list(self.suspended_ids)):
                     with self.queue_lock:
                         it = self.items_by_id.get(wid)
@@ -2761,10 +2873,12 @@ class EncoderApp:
         self.update_concurrency_buttons_ui()
         if hasattr(self, "status_badge") and "ENCODING" in self.status_badge.cget("text"):
             self.status_badge.configure(text_color=ULTRA_TEXT, fg_color=ULTRA_BG)
-        elif hasattr(self, "status_badge") and "PAUSED" in self.status_badge.cget("text"):
+        elif hasattr(self, "status_badge") and any(k in self.status_badge.cget("text") for k in ("PAUSED", "WAIT IDLE", "BUSY")):
             self.status_badge.configure(text_color=HOLD_TEXT, fg_color=HOLD_BG)
         if hasattr(self, "switch_auto_start"):
             self.switch_auto_start.configure(progress_color=ULTRA_BG, button_color=ULTRA_TEXT, button_hover_color=ULTRA_TEXT_HOVER)
+        if hasattr(self, "switch_idle_only"):
+            self.switch_idle_only.configure(progress_color=ULTRA_BG, button_color=ULTRA_TEXT, button_hover_color=ULTRA_TEXT_HOVER)
         if hasattr(self, "cb_tag_settings"):
             self.cb_tag_settings.configure(fg_color=ULTRA_BG, hover_color=ULTRA_BG_HOVER, border_color=ULTRA_BORDER, checkmark_color=ULTRA_TEXT)
         if hasattr(self, "denoise_cb"):
@@ -2865,10 +2979,180 @@ class EncoderApp:
                 f.write("1" if val else "0")
         except Exception: pass
 
+    def launch_new_instance(self):
+        try:
+            if getattr(sys, "frozen", False):
+                app_bundle = os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", ".."))
+                if app_bundle.endswith(".app") and os.path.isdir(app_bundle):
+                    subprocess.Popen(["open", "-n", app_bundle])
+                else:
+                    subprocess.Popen([sys.executable])
+            else:
+                subprocess.Popen([sys.executable, os.path.abspath(__file__)])
+        except Exception as e:
+            self.append_log(f"[ERROR] Could not open new instance: {e}\n")
+
     def toggle_auto_start(self):
         val = bool(self.switch_auto_start.get())
         self.auto_start = val
         self.save_auto_start(val)
+
+    def load_saved_idle_only(self):
+        try:
+            if os.path.exists(IDLE_ONLY_FILE):
+                with open(IDLE_ONLY_FILE, "r", encoding="utf-8") as f:
+                    return f.read().strip() == "1"
+        except Exception: pass
+        return False
+
+    def save_idle_only(self, val):
+        try:
+            os.makedirs(USER_PRESETS_DIR, exist_ok=True)
+            with open(IDLE_ONLY_FILE, "w", encoding="utf-8") as f:
+                f.write("1" if val else "0")
+        except Exception: pass
+
+    def load_saved_idle_delay(self):
+        try:
+            if os.path.exists(IDLE_DELAY_FILE):
+                with open(IDLE_DELAY_FILE, "r", encoding="utf-8") as f:
+                    v = int(f.read().strip())
+                    if v in (3, 5, 10, 15, 30, 60):
+                        return v
+        except Exception: pass
+        return 5
+
+    def save_idle_delay(self, val):
+        try:
+            os.makedirs(USER_PRESETS_DIR, exist_ok=True)
+            with open(IDLE_DELAY_FILE, "w", encoding="utf-8") as f:
+                f.write(str(int(val)))
+        except Exception: pass
+
+    def _set_idle_delay(self, sec):
+        self.idle_delay = int(sec)
+        self.save_idle_delay(self.idle_delay)
+        self.append_log(f"[INFO] Idle threshold set to {self.idle_delay}s.\n")
+
+    def _show_idle_delay_menu(self, event):
+        try:
+            menu = tk.Menu(self.root, tearoff=0)
+            for s in (3, 5, 10, 15, 30, 60):
+                prefix = "✔ " if getattr(self, "idle_delay", 5) == s else "   "
+                menu.add_command(label=f"{prefix}Wait {s}s before resuming", command=lambda val=s: self._set_idle_delay(val))
+            menu.tk_popup(event.x_root, event.y_root)
+        except Exception:
+            pass
+
+    def toggle_idle_only(self):
+        val = bool(self.switch_idle_only.get())
+        self.idle_only = val
+        self.save_idle_only(val)
+        if not val:
+            if self.is_running and not self.is_paused and self.is_idle_paused:
+                self._exit_idle_pause(reason_log="▶ [IDLE-END] Idle Only disabled — resuming encoding.\n")
+        else:
+            if self.is_running and not self.is_paused and not self.is_idle_paused:
+                idle_sec = get_system_idle_seconds()
+                if idle_sec < float(getattr(self, "idle_delay", 5)):
+                    rem = max(1, int(math.ceil(float(self.idle_delay) - idle_sec)))
+                    self._enter_idle_pause(wait_rem=rem, busy_app=None, reason_log="❚❚ [IDLE-WAIT] Idle Only enabled — yielding until inactive.\n")
+
+    def _enter_idle_pause(self, wait_rem=0, busy_app=None, reason_log=None):
+        with self.process_lock:
+            was_idle_paused = self.is_idle_paused
+            self.is_idle_paused = True
+            self._idle_wait_rem = max(0, int(wait_rem))
+            self._idle_busy_app = busy_app
+            if not self.is_running or self.is_paused:
+                return
+            if not was_idle_paused:
+                for iid in list(self.running_ids | self.suspended_ids):
+                    self._update_item_hold_clock(iid)
+                for proc in list(self.active_processes.values()):
+                    if proc and proc.poll() is None:
+                        safe_killpg(proc, signal.SIGSTOP)
+        if not was_idle_paused:
+            self.set_app_state("idle_wait")
+        if reason_log and not was_idle_paused:
+            self.append_log(reason_log)
+
+    def _exit_idle_pause(self, reason_log=None):
+        with self.process_lock:
+            if not self.is_idle_paused:
+                return
+            self.is_idle_paused = False
+            self._idle_busy_app = None
+            self._idle_wait_rem = 0
+            if not self.is_running or self.is_paused:
+                return
+            for iid in list(self.running_ids | self.suspended_ids):
+                self._update_item_hold_clock(iid)
+            self.set_app_state("encoding")
+            for item_id in list(self.running_ids):
+                proc = self.active_processes.get(item_id)
+                if proc and proc.poll() is None:
+                    safe_killpg(proc, signal.SIGCONT)
+        if reason_log:
+            self.append_log(reason_log)
+        self.rebalance_concurrency()
+
+    def _idle_monitor_loop(self):
+        last_badge_state = None
+        while not getattr(self, "_closing_app", False):
+            try:
+                if self.is_running and self.idle_only and not self.is_paused:
+                    idle_sec = get_system_idle_seconds()
+                    delay = float(getattr(self, "idle_delay", 5))
+                    if idle_sec < delay:
+                        rem = max(1, int(math.ceil(delay - idle_sec)))
+                        was_paused = self.is_idle_paused
+                        self._cached_nle_busy = None
+                        self._enter_idle_pause(
+                            wait_rem=rem,
+                            busy_app=None,
+                            reason_log="❚❚ [IDLE-WAIT] User activity detected — yielding CPU & GPU.\n" if not was_paused else None
+                        )
+                        cur_badge = ("wait", rem)
+                        if last_badge_state != cur_badge:
+                            last_badge_state = cur_badge
+                            self.set_app_state("idle_wait")
+                    else:
+                        now_m = time.monotonic()
+                        if self.is_idle_paused and (now_m - getattr(self, "_last_nle_check", 0.0)) >= 2.0:
+                            self._last_nle_check = now_m
+                            self._cached_nle_busy = get_active_pro_app_busy()
+                        elif not self.is_idle_paused:
+                            self._cached_nle_busy = None
+                        busy_app = self._cached_nle_busy
+                        if busy_app:
+                            was_paused = self.is_idle_paused
+                            self._enter_idle_pause(
+                                wait_rem=0,
+                                busy_app=busy_app,
+                                reason_log=f"❚❚ [IDLE-WAIT] {busy_app} active — yielding CPU & GPU.\n" if not was_paused else None
+                            )
+                            cur_badge = ("busy", busy_app)
+                            if last_badge_state != cur_badge:
+                                last_badge_state = cur_badge
+                                self.set_app_state("idle_wait")
+                        else:
+                            last_badge_state = None
+                            if self.is_idle_paused:
+                                self._exit_idle_pause(reason_log="▶ [IDLE-RESUME] System idle — resuming encode at full capacity.\n")
+                    time.sleep(0.25)
+                else:
+                    last_badge_state = None
+                    if self.is_idle_paused and (not self.idle_only or not self.is_running):
+                        if self.is_running and not self.is_paused:
+                            self._exit_idle_pause()
+                        else:
+                            self.is_idle_paused = False
+                            self._idle_busy_app = None
+                            self._idle_wait_rem = 0
+                    time.sleep(0.5)
+            except Exception:
+                time.sleep(0.5)
 
     def load_saved_tag_settings(self):
         try:
@@ -3091,7 +3375,7 @@ class EncoderApp:
                     os.remove(out_f)
                 except OSError: pass
             release_output_path(lk_f)
-        cleanup_system_ffmpeg(force_all=True)
+        cleanup_system_ffmpeg(force_all=False)
 
     def on_close(self):
         if hasattr(self, "preset_var") and self.preset_var.get() == "Custom" and not getattr(self, "selected_queue_ids", None):
@@ -3179,7 +3463,7 @@ class EncoderApp:
         self.theme_dot.bind("<Double-Button-1>", lambda e: self.reset_default_theme_color())
 
         self.status_badge = ctk.CTkLabel(
-            header_frame, text="● IDLE",
+            header_frame, text="● IDLE", width=142, anchor="center",
             font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"),
             text_color=DONE_GREEN, fg_color=DONE_BG, corner_radius=6, padx=10, pady=3
         )
@@ -3201,7 +3485,35 @@ class EncoderApp:
             self.switch_auto_start.select()
         else:
             self.switch_auto_start.deselect()
-        self.switch_auto_start.pack(side="right", padx=(0, 14))
+        self.switch_auto_start.pack(side="right", padx=(0, 12))
+
+        self.switch_idle_only = ctk.CTkSwitch(
+            header_frame, text="Idle Only",
+            font=ctk.CTkFont(family="SF Pro Text", size=13, weight="bold"),
+            text_color=TEXT_PRIMARY,
+            fg_color="#222222",
+            progress_color=ULTRA_BG,
+            button_color=ULTRA_TEXT,
+            button_hover_color=ULTRA_TEXT_HOVER,
+            command=self.toggle_idle_only,
+            width=42, height=20, switch_width=36, switch_height=18
+        )
+        if getattr(self, "idle_only", False):
+            self.switch_idle_only.select()
+        else:
+            self.switch_idle_only.deselect()
+        self.switch_idle_only.pack(side="right", padx=(0, 12))
+        self.switch_idle_only.bind("<Button-2>", self._show_idle_delay_menu, add="+")
+        self.switch_idle_only.bind("<Button-3>", self._show_idle_delay_menu, add="+")
+        self.switch_idle_only.bind("<Control-Button-1>", self._show_idle_delay_menu, add="+")
+
+        self.btn_new_instance = ctk.CTkButton(
+            header_frame, text="＋ New Window", width=112, height=26, corner_radius=6,
+            fg_color=NEUTRAL_BTN, hover_color=NEUTRAL_BTN_HOVER, text_color=TEXT_PRIMARY,
+            font=ctk.CTkFont(family="SF Pro Text", size=12, weight="bold"),
+            command=self.launch_new_instance
+        )
+        self.btn_new_instance.pack(side="right", padx=(0, 12))
 
         # Settings Card (Collapsible Accordion)
         self.settings_card = ctk.CTkFrame(self.main_container, fg_color=CARD_BG, border_width=0, corner_radius=12)
@@ -4782,6 +5094,14 @@ class EncoderApp:
             self.status_badge.configure(text="❚❚ PAUSED", text_color=HOLD_TEXT, fg_color=HOLD_BG)
             self.btn_cancel.configure(state="normal")
             self.update_action_button_ui()
+        elif state == "idle_wait":
+            if hasattr(self, "active_jobs_canvas"): self.active_jobs_canvas.set_paused(True)
+            busy_app = getattr(self, "_idle_busy_app", None)
+            rem = getattr(self, "_idle_wait_rem", 0)
+            badge_txt = f"❚❚ BUSY ({busy_app})" if busy_app else (f"❚❚ WAIT IDLE ({rem}s)" if rem > 0 else "❚❚ WAIT IDLE")
+            self.status_badge.configure(text=badge_txt, text_color=HOLD_TEXT, fg_color=HOLD_BG)
+            self.btn_cancel.configure(state="normal")
+            self.update_action_button_ui()
         elif state == "idle":
             if hasattr(self, "active_jobs_canvas"): self.active_jobs_canvas.set_paused(False)
             self.status_badge.configure(text="● IDLE", text_color=DONE_GREEN, fg_color=DONE_BG)
@@ -5221,6 +5541,7 @@ class EncoderApp:
                 self._update_queue_stats()
                 q_cnt = sum(1 for q in self.queue_items if q["status"] == "queued")
                 self.append_log(f"[INFO] Restored previous session ({restored} item(s), {q_cnt} queued).\n")
+                self._start_background_probe()
         except Exception:
             pass
 
@@ -5338,7 +5659,13 @@ class EncoderApp:
                     self.save_queue_state()
                     self.ui_queue.put(("refresh_queue", None))
                     if start_dispatcher:
-                        self.set_app_state("encoding")
+                        if self.idle_only and get_system_idle_seconds() < float(getattr(self, "idle_delay", 5)):
+                            self.is_idle_paused = True
+                            self._idle_wait_rem = max(1, int(math.ceil(float(self.idle_delay) - get_system_idle_seconds())))
+                            self.set_app_state("idle_wait")
+                        else:
+                            self.is_idle_paused = False
+                            self.set_app_state("encoding")
                         threading.Thread(target=self._batch_dispatcher, daemon=True).start()
 
             try:
@@ -5371,7 +5698,9 @@ class EncoderApp:
                                 if len(batch_chunk) >= 50: flush_chunk()
 
                 flush_chunk()
-                if total_added > 0: self.append_log(f"[INFO] Added {total_added} file(s) to queue.\n")
+                if total_added > 0:
+                    self.append_log(f"[INFO] Added {total_added} file(s) to queue.\n")
+                    self._start_background_probe()
             finally:
                 with self.queue_lock: self.active_scans = max(0, self.active_scans - 1)
 
@@ -5458,16 +5787,45 @@ class EncoderApp:
             on_hold = sum(1 for q in self.queue_items if q["status"] == "suspended")
             queued = sum(1 for q in self.queue_items if q["status"] == "queued")
             total_progress = 0.0
+            rem_media_sec = 0.0
+            known_durs = []
+            unprobed_queued = 0
+            active_speed_sum = 0.0
+            active_speed_count = 0
             for q in self.queue_items:
                 st = q.get("status")
+                qid = q["id"]
+                v_info = q.get("video_info")
+                q_dur = float(v_info[0]) if (v_info and len(v_info) > 0 and v_info[0]) else 0.0
+                if q_dur > 0:
+                    known_durs.append(q_dur)
                 if st in ("completed", "failed", "cancelled"):
                     total_progress += 1.0
+                elif st == "queued":
+                    if q_dur > 0:
+                        rem_media_sec += q_dur
+                    else:
+                        unprobed_queued += 1
                 elif st in ("encoding", "suspended"):
-                    item_pct = float(self.last_pct_map.get(q["id"], 0.0))
+                    item_pct = float(self.last_pct_map.get(qid, 0.0))
                     total_progress += min(0.999, max(0.0, item_pct / 100.0))
+                    lm = self.item_live_metrics.get(qid)
+                    if lm:
+                        c_sec, l_dur, sp_v = lm
+                        eff_dur = l_dur if l_dur > 0 else q_dur
+                        if eff_dur > 0:
+                            rem_media_sec += max(0.0, eff_dur - c_sec)
+                        if st == "encoding" and sp_v > 0:
+                            active_speed_sum += sp_v
+                            active_speed_count += 1
+                    elif q_dur > 0:
+                        rem_media_sec += q_dur * (1.0 - min(1.0, max(0.0, item_pct / 100.0)))
+            if unprobed_queued > 0 and known_durs:
+                rem_media_sec += unprobed_queued * (sum(known_durs) / len(known_durs))
 
         if total == 0:
             self._last_batch_summary = None
+            self._batch_speed_ema = None
             self.lbl_batch_status.configure(text="Queue is empty")
             self.batch_target_pct = 0.0
             self.batch_cur_pct = 0.0
@@ -5497,7 +5855,7 @@ class EncoderApp:
             else:
                 new_p = max(0.0, min(0.99, target_p / 100.0))
                 new_pct_str = f"{min(99, int(round(target_p)))}%"
-                if self.is_paused:
+                if self.is_paused or self.is_idle_paused:
                     cols = (HOLD_TEXT, HOLD_TEXT, HOLD_TEXT)
                 elif running > 0 or on_hold > 0:
                     cols = (ULTRA_TEXT, ULTRA_TEXT, ULTRA_TEXT)
@@ -5513,11 +5871,31 @@ class EncoderApp:
                     self._last_batch_colors = cols
             if hasattr(self, "lbl_batch_pct") and self.lbl_batch_pct.cget("text") != new_pct_str:
                 self.lbl_batch_pct.configure(text=new_pct_str)
+            if is_batch_done:
+                self._batch_speed_ema = None
+            elif active_speed_sum > 0 and not self.is_paused and not self.is_idle_paused:
+                now_m = time.monotonic()
+                if getattr(self, "_batch_speed_ema", None) is None:
+                    init_speed = active_speed_sum * (running / active_speed_count) if (running > active_speed_count > 0) else active_speed_sum
+                    self._batch_speed_ema = init_speed
+                    self._last_batch_eta_t = now_m
+                elif (now_m - getattr(self, "_last_batch_eta_t", 0.0)) >= 0.8:
+                    self._batch_speed_ema = 0.25 * active_speed_sum + 0.75 * self._batch_speed_ema
+                    self._last_batch_eta_t = now_m
+
             txt = f"Batch: {completed}/{total} Completed"
             parts = []
             if running > 0: parts.append(f"{running} Active")
             if on_hold > 0: parts.append(f"{on_hold} On Hold")
             if queued > 0: parts.append(f"{queued} Queued")
+            if not is_batch_done and self.is_running:
+                eff_speed = getattr(self, "_batch_speed_ema", None)
+                if self.is_paused or self.is_idle_paused:
+                    parts.append("ETA: --:--")
+                elif rem_media_sec > 0 and eff_speed and eff_speed > 0:
+                    parts.append(format_eta_str(rem_media_sec / eff_speed))
+                elif running > 0:
+                    parts.append("ETA: --:--")
             if parts: txt += " • " + " • ".join(parts)
             elif completed > 0 and getattr(self, "_last_batch_summary", None):
                 txt += f"  •  {self._last_batch_summary}"
@@ -5573,11 +5951,48 @@ class EncoderApp:
                 state="normal"
             )
 
+    def _start_background_probe(self):
+        with self.queue_lock:
+            if getattr(self, "_bg_probe_running", False):
+                return
+            self._bg_probe_running = True
+
+        def _probe_worker():
+            probed_since_ui = 0
+            try:
+                while not getattr(self, "_closing_app", False):
+                    cand = None
+                    with self.queue_lock:
+                        for q in self.queue_items:
+                            if q.get("status") == "queued" and "video_info" not in q and not q.get("_probing"):
+                                q["_probing"] = True
+                                cand = q
+                                break
+                    if not cand:
+                        break
+                    try:
+                        self.get_item_res_weight(cand)
+                    finally:
+                        cand.pop("_probing", None)
+                    probed_since_ui += 1
+                    if probed_since_ui >= 4:
+                        probed_since_ui = 0
+                        self.ui_queue.put(("refresh_stats", None))
+                    time.sleep(0.02)
+            finally:
+                with self.queue_lock:
+                    self._bg_probe_running = False
+                if not getattr(self, "_closing_app", False):
+                    self.ui_queue.put(("refresh_stats", None))
+
+        threading.Thread(target=_probe_worker, daemon=True).start()
+
     def start_batch(self):
         if self.is_running:
             return
         self.clear_selection()
         self._dispatcher_crash_count = 0
+        self._start_background_probe()
         with self.queue_lock:
             has_queued = any(q["status"] == "queued" for q in self.queue_items)
             if not has_queued:
@@ -5587,7 +6002,19 @@ class EncoderApp:
                 self.dispatcher_alive = True
                 self.is_running = True
                 self.is_paused = False
-                self.set_app_state("encoding")
+                if self.idle_only:
+                    idle_now = get_system_idle_seconds()
+                    if idle_now < float(getattr(self, "idle_delay", 5)):
+                        self.is_idle_paused = True
+                        self._idle_wait_rem = max(1, int(math.ceil(float(self.idle_delay) - idle_now)))
+                        self.set_app_state("idle_wait")
+                        self.append_log(f"❚❚ [IDLE-WAIT] Armed — encoding will start after {self.idle_delay}s of inactivity.\n")
+                    else:
+                        self.is_idle_paused = False
+                        self.set_app_state("encoding")
+                else:
+                    self.is_idle_paused = False
+                    self.set_app_state("encoding")
                 threading.Thread(target=self._batch_dispatcher, daemon=True).start()
 
     def on_queue_item_selected(self, item_id, event=None):
@@ -5880,7 +6307,7 @@ class EncoderApp:
 
     def _update_item_hold_clock(self, item_id):
         st = self.item_hold_state.setdefault(item_id, {"held_total": 0.0, "held_since": None})
-        is_held = self.is_paused or (item_id in self.suspended_ids)
+        is_held = self.is_paused or self.is_idle_paused or (item_id in self.suspended_ids)
         now_m = time.monotonic()
         if is_held and st["held_since"] is None:
             st["held_since"] = now_m
@@ -5903,6 +6330,8 @@ class EncoderApp:
             try:
                 if not self.is_paused:
                     self.is_paused = True
+                    self.is_idle_paused = False
+                    self._idle_busy_app = None
                     for iid in list(self.running_ids | self.suspended_ids):
                         self._update_item_hold_clock(iid)
                     self.set_app_state("paused")
@@ -5912,14 +6341,22 @@ class EncoderApp:
                     self.append_log("❚❚ [PAUSED] Encoding queue paused.\n")
                 else:
                     self.is_paused = False
-                    for iid in list(self.running_ids | self.suspended_ids):
-                        self._update_item_hold_clock(iid)
-                    self.set_app_state("encoding")
-                    for item_id in list(self.running_ids):
-                        proc = self.active_processes.get(item_id)
-                        if proc and proc.poll() is None:
-                            safe_killpg(proc, signal.SIGCONT)
-                    self.append_log("▶ [RESUMED] Encoding queue resumed.\n")
+                    idle_now = get_system_idle_seconds()
+                    if self.idle_only and (idle_now < float(getattr(self, "idle_delay", 5)) or self._cached_nle_busy):
+                        self.is_idle_paused = True
+                        self._idle_wait_rem = max(1, int(math.ceil(float(self.idle_delay) - idle_now))) if idle_now < float(self.idle_delay) else 0
+                        self.set_app_state("idle_wait")
+                        self.append_log("❚❚ [IDLE-WAIT] Queue unpaused — waiting for system inactivity.\n")
+                    else:
+                        self.is_idle_paused = False
+                        for iid in list(self.running_ids | self.suspended_ids):
+                            self._update_item_hold_clock(iid)
+                        self.set_app_state("encoding")
+                        for item_id in list(self.running_ids):
+                            proc = self.active_processes.get(item_id)
+                            if proc and proc.poll() is None:
+                                safe_killpg(proc, signal.SIGCONT)
+                        self.append_log("▶ [RESUMED] Encoding queue resumed.\n")
             except Exception as e: self.append_log(f"[ERROR] Pause toggle failed: {e}\n")
 
     def cancel_current(self):
@@ -6285,7 +6722,7 @@ class EncoderApp:
                     self._batch_completed_count = 0
                     self._last_batch_summary = None
             while True:
-                if self.is_paused:
+                if self.is_paused or self.is_idle_paused:
                     with self.process_lock:
                         with self.queue_lock:
                             has_unfinished = any(q["status"] in ("queued", "encoding", "suspended") for q in self.queue_items)
@@ -6293,6 +6730,7 @@ class EncoderApp:
                             is_scanning = getattr(self, "active_scans", 0) > 0
                             if not has_unfinished and not has_active and not is_scanning:
                                 self.is_paused = False
+                                self.is_idle_paused = False
                                 self.is_running = False
                                 self.dispatcher_alive = False
                                 break
@@ -6450,6 +6888,7 @@ class EncoderApp:
                     )
                     if crashes >= 3:
                         self.is_paused = False
+                        self.is_idle_paused = False
                         self._batch_start_time = None
                         self.is_running = False
                         self.dispatcher_alive = False
@@ -6467,6 +6906,7 @@ class EncoderApp:
                         respawn_needed = True
                     else:
                         self.is_paused = False
+                        self.is_idle_paused = False
                         self._batch_start_time = None
                         self.is_running = False
                         self.dispatcher_alive = False
@@ -7025,6 +7465,10 @@ class EncoderApp:
                     if elapsed_launch < stagger_needed:
                         time.sleep(stagger_needed - elapsed_launch)
                     proc = subprocess.Popen(exec_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", bufsize=1, start_new_session=True)
+                    try:
+                        os.setpriority(os.PRIO_PROCESS, proc.pid, 15)
+                    except Exception:
+                        pass
                     self._last_hw_launch_time = time.time()
                     with self.process_lock:
                         self.retrying_ids.discard(item_id)
@@ -7039,7 +7483,7 @@ class EncoderApp:
                         with self.queue_lock: current_item["status"] = "cancelled"
                         self.update_item_status_ui(item_id, "cancelled", refresh_stats=True)
                         return
-                    if item_id in self.suspended_ids or self.is_paused:
+                    if item_id in self.suspended_ids or self.is_paused or self.is_idle_paused:
                         safe_killpg(proc, signal.SIGSTOP)
 
                 last_heartbeat = [time.time()]
@@ -7082,7 +7526,7 @@ class EncoderApp:
                     while p and p.poll() is None:
                         time.sleep(1.5)
                         with self.process_lock:
-                            is_held = self.is_paused or (item_id in self.suspended_ids)
+                            is_held = self.is_paused or self.is_idle_paused or (item_id in self.suspended_ids)
                         if is_held:
                             last_heartbeat[0] = time.time()
                             continue
@@ -7184,18 +7628,20 @@ class EncoderApp:
                                 cur_sec = duration if duration > 0 else max_cur_sec
                                 show_hours = (duration >= 3600) or (cur_sec >= 3600)
                                 t_str = f"Time: {format_time_duration(cur_sec, show_hours)} / {format_time_duration(duration if duration > 0 else cur_sec, show_hours)}"
+                                self.item_live_metrics.pop(item_id, None)
                                 self.update_progress_ui(item_id, 100.0, t_str, f"Speed: {speed}", f"FPS: {fps_display}", "ETA: 00:00")
                                 self.update_item_status_ui(item_id, "encoding", "100%")
                                 break
                             else:
-                                if (now_t - last_progress_push) >= 0.5:
+                                if (now_t - last_progress_push) >= 1.0:
                                     last_progress_push = now_t
                                     eta_str = format_eta_str(max(0.0, (duration - cur_sec) / sp_val)) if (sp_val > 0 and cur_sec < duration) else "ETA: --:--"
                                     show_hours = (duration >= 3600) or (cur_sec >= 3600)
                                     t_str = f"Time: {format_time_duration(cur_sec, show_hours)} / {format_time_duration(duration, show_hours)}"
                                     with self.process_lock:
-                                        is_suspended = (item_id in self.suspended_ids) or self.is_paused
+                                        is_suspended = (item_id in self.suspended_ids) or self.is_paused or self.is_idle_paused
                                     if not is_suspended:
+                                        self.item_live_metrics[item_id] = (cur_sec, duration, sp_val)
                                         self.update_progress_ui(item_id, pct, t_str, f"Speed: {speed if 'x' in speed else speed + 'x'}", f"FPS: {fps_display}", eta_str)
                                         self.update_item_status_ui(item_id, "encoding", f"{int(pct)}%")
 
@@ -7327,6 +7773,7 @@ class EncoderApp:
             with self.queue_lock: current_item["status"] = "failed"
             self.update_item_status_ui(item_id, "failed", refresh_stats=True)
         finally:
+            self.item_live_metrics.pop(item_id, None)
             is_completed = (exit_code == 0 and not is_cancelled)
             self.ui_queue.put(("job_end", (item_id, is_completed)))
             with self.process_lock:
