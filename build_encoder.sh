@@ -7448,7 +7448,10 @@ class EncoderApp:
                     self.last_pct_map[item_id] = 0.0
                     self.update_progress_ui(item_id, 0.0, "00:00 / --:--", "0.0x", "0 fps", "ETA: --:--")
                 stderr_lines = deque(maxlen=1000)
-                exec_cmd = cmd
+                if os.path.exists("/usr/bin/taskpolicy"):
+                    exec_cmd = ["/usr/bin/taskpolicy", "-c", "utility", "-d", "throttle"] + cmd
+                else:
+                    exec_cmd = cmd
                 with self.hw_launch_lock:
                     with self.process_lock:
                         if item_id in self.cancelled_ids or self.cancel_requested:
@@ -7465,7 +7468,7 @@ class EncoderApp:
                         time.sleep(stagger_needed - elapsed_launch)
                     proc = subprocess.Popen(exec_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", bufsize=1, start_new_session=True)
                     try:
-                        os.setpriority(os.PRIO_PROCESS, proc.pid, 15)
+                        os.setpriority(os.PRIO_PROCESS, proc.pid, 20)
                     except Exception:
                         pass
                     self._last_hw_launch_time = time.time()
